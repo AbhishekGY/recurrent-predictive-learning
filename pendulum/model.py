@@ -2,9 +2,13 @@
 RPL Network Architecture for Inverted Pendulum Control
 
 This module implements the three-component architecture for Recurrent Predictive Learning:
-1. Encoder: Maps raw state to embedding space
-2. Integrator: LSTM that maintains temporal context
-3. Predictor: Predicts next embedding from current context
+1. Encoder: Maps raw state to embedding space (NO action input)
+2. Integrator: LSTM that maintains temporal context (action-conditioned)
+3. Predictor: Predicts next STATE embedding from current context
+
+KEY ARCHITECTURAL PRINCIPLE: The network learns an action-conditioned forward model
+where actions are inputs to the integrator but NOT part of the prediction target.
+This avoids the problem of trying to predict randomly sampled forces.
 
 The network learns a forward model of the pendulum dynamics purely from
 prediction errors, without explicit physics knowledge or reward signals.
@@ -23,6 +27,10 @@ class Encoder(nn.Module):
         Input (4D) -> Linear(64) -> ReLU -> Linear(64) -> ReLU -> Linear(32)
 
     The encoder is memoryless - it processes each state independently.
+    It does NOT receive force/action as input.
+
+    Mathematical operation:
+        z_t = phi(x_t)  where x_t = [x, v_x, theta, omega]
     """
 
     def __init__(self, state_dim: int = 4, hidden_dim: int = 64, embedding_dim: int = 32):
@@ -54,16 +62,23 @@ class Integrator(nn.Module):
 
     Architecture:
         Single-layer LSTM with 64 hidden units
+        Input: concatenated [embedding (32D), action (1D)] = 33D
 
     The integrator accumulates information over the sequence, capturing
-    patterns like whether the pendulum is accelerating or decelerating.
+    patterns like whether the pendulum is accelerating or decelerating,
+    AND how actions have influenced the trajectory.
+
+    Mathematical operation:
+        h_t, c_t = LSTM([z_t, F_t], h_{t-1}, c_{t-1})
     """
 
-    def __init__(self, embedding_dim: int = 32, hidden_dim: int = 64):
+    def __init__(self, embedding_dim: int = 32, action_dim: int = 1, hidden_dim: int = 64):
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.action_dim = action_dim
+        # Input is embedding + action concatenated
         self.lstm = nn.LSTM(
-            input_size=embedding_dim,
+            input_size=embedding_dim + action_dim,  # 33D input
             hidden_size=hidden_dim,
             num_layers=1,
             batch_first=True,
@@ -72,24 +87,27 @@ class Integrator(nn.Module):
     def forward(
         self,
         embedding: torch.Tensor,
+        action: torch.Tensor,
         hidden: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
-        Process embedding sequence through LSTM.
+        Process embedding and action sequence through LSTM.
 
         Args:
             embedding: Tensor of shape (batch, seq_len, 32) or (batch, 32)
+            action: Tensor of shape (batch, seq_len, 1) or (batch, 1)
             hidden: Optional tuple of (h_0, c_0) each of shape (1, batch, 64)
 
         Returns:
             Tuple of:
-                - cell_states: Tensor of shape (batch, seq_len, 64) or (batch, 64)
+                - hidden_states: Tensor of shape (batch, seq_len, 64) or (batch, 64)
                 - hidden: Tuple of (h_n, c_n) for next step
         """
         # Handle single timestep input
         squeeze_output = False
         if embedding.dim() == 2:
             embedding = embedding.unsqueeze(1)  # (batch, 1, 32)
+            action = action.unsqueeze(1)  # (batch, 1, 1)
             squeeze_output = True
 
         batch_size = embedding.size(0)
@@ -98,14 +116,11 @@ class Integrator(nn.Module):
         if hidden is None:
             hidden = self.init_hidden(batch_size, embedding.device)
 
-        # Run LSTM
-        output, (h_n, c_n) = self.lstm(embedding, hidden)
+        # Concatenate embedding and action
+        lstm_input = torch.cat([embedding, action], dim=-1)  # (batch, seq_len, 33)
 
-        # We use the cell state as our internal representation
-        # output contains h_t at each timestep, we want c_t
-        # For sequences, we need to extract c_t at each step
-        # The LSTM only gives us the final c_n, so we use output (h_t) instead
-        # Actually, for prediction we'll use the output (hidden state h_t)
+        # Run LSTM
+        output, (h_n, c_n) = self.lstm(lstm_input, hidden)
 
         if squeeze_output:
             output = output.squeeze(1)  # (batch, 64)
@@ -123,12 +138,16 @@ class Integrator(nn.Module):
 
 class Predictor(nn.Module):
     """
-    MLP that predicts next embedding from current LSTM state.
+    MLP that predicts next STATE embedding from current LSTM state.
 
     Architecture:
         Input (64D) -> Linear(64) -> ReLU -> Linear(32)
 
     The predictor learns the forward dynamics in embedding space.
+    It predicts next STATE embedding only, NOT the next action.
+
+    Mathematical operation:
+        z_hat_{t+1} = f(h_t)
     """
 
     def __init__(self, hidden_dim: int = 64, embedding_dim: int = 32):
@@ -156,28 +175,39 @@ class RPLModel(nn.Module):
     """
     Complete RPL model combining Encoder, Integrator, and Predictor.
 
-    The model processes state sequences and learns to predict future embeddings.
+    The model processes state-action sequences and learns to predict future
+    state embeddings. Actions are inputs to the model but NOT prediction targets.
+
     Training uses stop-gradient on target embeddings to prevent representation collapse.
+
+    Network wiring at each timestep during training:
+        1. Encoder processes current state -> embedding z_t = phi(x_t)
+        2. Integrator incorporates embedding AND action -> h_t = LSTM([z_t, F_t], h_{t-1})
+        3. Predictor uses representation -> predicted next embedding z_hat_{t+1} = f(h_t)
+        4. Target is z_{t+1} = phi(x_{t+1}) with stop-gradient (no force in target!)
     """
 
     def __init__(
         self,
         state_dim: int = 4,
+        action_dim: int = 1,
         embedding_dim: int = 32,
         hidden_dim: int = 64,
     ):
         super().__init__()
         self.state_dim = state_dim
+        self.action_dim = action_dim
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
 
         self.encoder = Encoder(state_dim, hidden_dim, embedding_dim)
-        self.integrator = Integrator(embedding_dim, hidden_dim)
+        self.integrator = Integrator(embedding_dim, action_dim, hidden_dim)
         self.predictor = Predictor(hidden_dim, embedding_dim)
 
     def forward(
         self,
         states: torch.Tensor,
+        actions: torch.Tensor,
         hidden: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> dict[str, torch.Tensor]:
         """
@@ -185,6 +215,8 @@ class RPLModel(nn.Module):
 
         Args:
             states: Tensor of shape (batch, seq_len, 4) - sequence of states
+            actions: Tensor of shape (batch, seq_len-1, 1) - forces applied
+                     Action[t] causes transition from state[t] to state[t+1]
             hidden: Optional initial hidden state for LSTM
 
         Returns:
@@ -192,21 +224,27 @@ class RPLModel(nn.Module):
                 - 'embeddings': Encoded states (batch, seq_len, 32)
                 - 'predictions': Predicted next embeddings (batch, seq_len-1, 32)
                 - 'targets': Target embeddings with stop-gradient (batch, seq_len-1, 32)
-                - 'lstm_outputs': LSTM hidden states (batch, seq_len, 64)
+                - 'lstm_outputs': LSTM hidden states (batch, seq_len-1, 64)
                 - 'hidden': Final LSTM hidden state tuple
         """
         batch_size, seq_len, _ = states.shape
 
-        # Encode all states
+        # Encode all states (no action in encoder!)
         embeddings = self.encoder(states)  # (batch, seq_len, 32)
 
-        # Run through integrator
-        lstm_outputs, hidden = self.integrator(embeddings, hidden)  # (batch, seq_len, 64)
+        # For LSTM, we process states[:-1] with actions to predict states[1:]
+        # Run through integrator with embeddings[:-1] and actions
+        lstm_outputs, hidden = self.integrator(
+            embeddings[:, :-1, :],  # (batch, seq_len-1, 32)
+            actions,                 # (batch, seq_len-1, 1)
+            hidden
+        )  # Output: (batch, seq_len-1, 64)
 
-        # Predict next embeddings (from t=0 to t=seq_len-2, predicting t=1 to t=seq_len-1)
-        predictions = self.predictor(lstm_outputs[:, :-1, :])  # (batch, seq_len-1, 32)
+        # Predict next embeddings
+        predictions = self.predictor(lstm_outputs)  # (batch, seq_len-1, 32)
 
-        # Targets are the actual next embeddings with stop-gradient
+        # Targets are the actual next embeddings (states[1:]) with stop-gradient
+        # Note: targets are STATE embeddings only, no force component!
         targets = embeddings[:, 1:, :].detach()  # (batch, seq_len-1, 32)
 
         return {
@@ -220,6 +258,7 @@ class RPLModel(nn.Module):
     def forward_step(
         self,
         state: torch.Tensor,
+        action: torch.Tensor,
         hidden: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -227,6 +266,7 @@ class RPLModel(nn.Module):
 
         Args:
             state: Tensor of shape (batch, 4) - current state
+            action: Tensor of shape (batch, 1) - force to apply
             hidden: LSTM hidden state from previous step
 
         Returns:
@@ -235,11 +275,11 @@ class RPLModel(nn.Module):
                 - prediction: Predicted next embedding (batch, 32)
                 - hidden: Updated LSTM hidden state
         """
-        # Encode current state
+        # Encode current state (no action)
         embedding = self.encoder(state)  # (batch, 32)
 
-        # Update integrator
-        lstm_output, hidden = self.integrator(embedding, hidden)  # (batch, 64)
+        # Update integrator with embedding and action
+        lstm_output, hidden = self.integrator(embedding, action, hidden)  # (batch, 64)
 
         # Predict next embedding
         prediction = self.predictor(lstm_output)  # (batch, 32)
@@ -249,13 +289,15 @@ class RPLModel(nn.Module):
     def get_representation(
         self,
         state: torch.Tensor,
+        action: torch.Tensor,
         hidden: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
-        Get internal representation for a state (for linear probing).
+        Get internal representation for a state-action pair (for linear probing).
 
         Args:
             state: Tensor of shape (batch, 4)
+            action: Tensor of shape (batch, 1)
             hidden: LSTM hidden state
 
         Returns:
@@ -264,8 +306,33 @@ class RPLModel(nn.Module):
                 - hidden: Updated hidden state
         """
         embedding = self.encoder(state)
-        lstm_output, hidden = self.integrator(embedding, hidden)
+        lstm_output, hidden = self.integrator(embedding, action, hidden)
         return lstm_output, hidden
+
+    def predict_for_action(
+        self,
+        state: torch.Tensor,
+        action: torch.Tensor,
+        hidden: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """
+        Predict next state embedding for a hypothetical action (for planning).
+
+        This creates a temporary/hypothetical integrator state - use for evaluating
+        candidate actions during control, but don't persist the hidden state.
+
+        Args:
+            state: Tensor of shape (batch, 4) - current state
+            action: Tensor of shape (batch, 1) - hypothetical force to evaluate
+            hidden: LSTM hidden state from processing history
+
+        Returns:
+            Predicted next state embedding (batch, 32)
+        """
+        embedding = self.encoder(state)
+        lstm_output, _ = self.integrator(embedding, action, hidden)
+        prediction = self.predictor(lstm_output)
+        return prediction
 
 
 def compute_prediction_loss(
@@ -302,12 +369,13 @@ def compute_prediction_loss(
 
 def test_model():
     """Test the RPL model with dummy data."""
-    print("=== RPL Model Test ===\n")
+    print("=== RPL Model Test (Action-Conditioned) ===\n")
 
     # Create model
     model = RPLModel()
     print(f"Model created with:")
     print(f"  - State dim: {model.state_dim}")
+    print(f"  - Action dim: {model.action_dim}")
     print(f"  - Embedding dim: {model.embedding_dim}")
     print(f"  - Hidden dim: {model.hidden_dim}")
 
@@ -319,22 +387,28 @@ def test_model():
     print("Test 1: Sequence forward pass")
     batch_size, seq_len = 8, 50
     dummy_states = torch.randn(batch_size, seq_len, 4)
+    dummy_actions = torch.randn(batch_size, seq_len - 1, 1)  # T-1 actions for T states
 
-    output = model(dummy_states)
+    output = model(dummy_states, dummy_actions)
 
-    print(f"  Input shape: {dummy_states.shape}")
+    print(f"  States shape: {dummy_states.shape}")
+    print(f"  Actions shape: {dummy_actions.shape}")
     print(f"  Embeddings shape: {output['embeddings'].shape}")
     print(f"  Predictions shape: {output['predictions'].shape}")
     print(f"  Targets shape: {output['targets'].shape}")
     print(f"  LSTM outputs shape: {output['lstm_outputs'].shape}")
+    assert output['predictions'].shape == (batch_size, seq_len - 1, 32)
+    assert output['targets'].shape == (batch_size, seq_len - 1, 32)
     print("  PASSED\n")
 
     # Test 2: Single step forward
     print("Test 2: Single step forward pass")
     single_state = torch.randn(batch_size, 4)
-    embedding, prediction, hidden = model.forward_step(single_state)
+    single_action = torch.randn(batch_size, 1)
+    embedding, prediction, hidden = model.forward_step(single_state, single_action)
 
-    print(f"  Input shape: {single_state.shape}")
+    print(f"  State shape: {single_state.shape}")
+    print(f"  Action shape: {single_action.shape}")
     print(f"  Embedding shape: {embedding.shape}")
     print(f"  Prediction shape: {prediction.shape}")
     print(f"  Hidden h shape: {hidden[0].shape}")
@@ -344,20 +418,22 @@ def test_model():
     # Test 3: Sequential single steps (simulating control loop)
     print("Test 3: Sequential control loop simulation")
     hidden = None
-    states_sequence = torch.randn(10, 4)  # 10 timesteps, single batch
+    states_sequence = torch.randn(10, 4)  # 10 timesteps
+    actions_sequence = torch.randn(10, 1)  # 10 actions
 
     for t in range(10):
         state = states_sequence[t:t+1]  # (1, 4)
-        embedding, prediction, hidden = model.forward_step(state, hidden)
+        action = actions_sequence[t:t+1]  # (1, 1)
+        embedding, prediction, hidden = model.forward_step(state, action, hidden)
 
-    print(f"  Processed 10 sequential steps")
+    print(f"  Processed 10 sequential steps with actions")
     print(f"  Final embedding shape: {embedding.shape}")
     print(f"  Hidden state preserved across steps")
     print("  PASSED\n")
 
     # Test 4: Loss computation
     print("Test 4: Loss computation")
-    output = model(dummy_states)
+    output = model(dummy_states, dummy_actions)
     loss = compute_prediction_loss(output['predictions'], output['targets'])
 
     print(f"  Loss value: {loss.item():.4f}")
@@ -367,22 +443,65 @@ def test_model():
     # Test 5: Gradient flow
     print("Test 5: Gradient flow check")
     model.zero_grad()
-    output = model(dummy_states)
+    output = model(dummy_states, dummy_actions)
     loss = compute_prediction_loss(output['predictions'], output['targets'])
     loss.backward()
 
     encoder_grad = model.encoder.network[0].weight.grad
+    integrator_grad = model.integrator.lstm.weight_ih_l0.grad
     predictor_grad = model.predictor.network[0].weight.grad
 
     print(f"  Encoder gradient norm: {encoder_grad.norm().item():.4f}")
+    print(f"  Integrator gradient norm: {integrator_grad.norm().item():.4f}")
     print(f"  Predictor gradient norm: {predictor_grad.norm().item():.4f}")
-    print(f"  Gradients are flowing through network")
+    print(f"  Gradients are flowing through all components")
     print("  PASSED\n")
 
     # Test 6: Stop-gradient verification
     print("Test 6: Stop-gradient on targets")
     print(f"  targets.requires_grad: {output['targets'].requires_grad}")
     print(f"  predictions.requires_grad: {output['predictions'].requires_grad}")
+    assert not output['targets'].requires_grad
+    assert output['predictions'].requires_grad
+    print("  PASSED\n")
+
+    # Test 7: Action planning (hypothetical evaluation)
+    print("Test 7: Action planning - evaluate candidate actions")
+    current_state = torch.randn(1, 4)
+    candidate_forces = [-10, -5, 0, 5, 10]
+
+    # First, build up hidden state from some history
+    hidden = None
+    for _ in range(5):
+        _, _, hidden = model.forward_step(
+            torch.randn(1, 4),
+            torch.randn(1, 1),
+            hidden
+        )
+
+    # Now evaluate candidate actions
+    predictions = []
+    for force in candidate_forces:
+        force_tensor = torch.tensor([[force]], dtype=torch.float32)
+        pred = model.predict_for_action(current_state, force_tensor, hidden)
+        predictions.append(pred)
+
+    print(f"  Current state shape: {current_state.shape}")
+    print(f"  Evaluated {len(candidate_forces)} candidate actions")
+    print(f"  Each prediction shape: {predictions[0].shape}")
+    print("  PASSED\n")
+
+    # Test 8: Verify action affects prediction
+    print("Test 8: Different actions produce different predictions")
+    state = torch.zeros(1, 4)  # Fixed state
+    hidden = None
+
+    pred_neg = model.predict_for_action(state, torch.tensor([[-10.0]]), hidden)
+    pred_pos = model.predict_for_action(state, torch.tensor([[10.0]]), hidden)
+
+    diff = (pred_neg - pred_pos).abs().mean().item()
+    print(f"  Prediction difference for F=-10 vs F=+10: {diff:.4f}")
+    assert diff > 0, "Different actions should produce different predictions"
     print("  PASSED\n")
 
     print("=== All tests passed ===")
