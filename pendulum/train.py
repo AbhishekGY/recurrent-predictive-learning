@@ -168,6 +168,7 @@ def save_checkpoint(
     epoch: int,
     loss: float,
     path: Path,
+    epoch_losses: list = None,
 ) -> None:
     """Save a training checkpoint."""
     checkpoint = {
@@ -176,6 +177,8 @@ def save_checkpoint(
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss,
     }
+    if epoch_losses is not None:
+        checkpoint['epoch_losses'] = epoch_losses
     torch.save(checkpoint, path)
 
 
@@ -310,7 +313,8 @@ def main():
         # Save checkpoint every 20 epochs
         if epoch % 20 == 0:
             checkpoint_path = checkpoint_dir / f"rpl_model_epoch_{epoch}.pt"
-            save_checkpoint(model, optimizer, epoch, loss, checkpoint_path)
+            save_checkpoint(model, optimizer, epoch, loss, checkpoint_path,
+                           epoch_losses=losses)
             print(f"  -> Saved checkpoint: {checkpoint_path}")
 
     print("-" * 50)
@@ -320,7 +324,8 @@ def main():
 
     # Save final model
     final_path = checkpoint_dir / "rpl_model_final.pt"
-    save_checkpoint(model, optimizer, args.epochs, losses[-1], final_path)
+    save_checkpoint(model, optimizer, args.epochs, losses[-1], final_path,
+                    epoch_losses=losses)
     print(f"Final model saved to: {final_path}")
 
     # Print loss progression
