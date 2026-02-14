@@ -73,7 +73,6 @@ class PendulumAnimator:
 
         # Episode state
         self.state = None
-        self.hidden = None
         self.step_count = 0
         self.done = False
         self.trajectory_pca = []  # PCA-projected representations
@@ -177,7 +176,6 @@ class PendulumAnimator:
         """Reset for a new episode."""
         self.state = self.env.reset(angle_range=0.05, omega_range=0.05)
         self.controller.reset()
-        self.hidden = None
         self.step_count = 0
         self.done = False
         self.trajectory_pca = []
@@ -189,47 +187,35 @@ class PendulumAnimator:
 
         state = self.state
 
-        # --- Evaluate candidate actions and collect predictions ---
+        # --- Select action using the real controller (same as control.py) ---
+        best_force = self.controller.select_action(state)
+        best_idx = self.controller.candidate_forces.index(best_force)
+
+        # --- Collect 64D LSTM representations for visualization only ---
         state_tensor = torch.from_numpy(state).unsqueeze(0).to(self.device)
         pred_pcas = []
-        costs = []
 
         with torch.no_grad():
             z_current = self.model.encoder(state_tensor)
             for force in self.controller.candidate_forces:
                 force_tensor = torch.tensor([[force]], dtype=torch.float32,
                                             device=self.device)
-                # Get hypothetical 64D LSTM output for PCA projection
                 h_hyp, _ = self.model.integrator(
-                    z_current, force_tensor, self.hidden
+                    z_current, force_tensor, self.controller.hidden
                 )
                 pred_pca = self.pca.transform(h_hyp.cpu().numpy())[0]
                 pred_pcas.append(pred_pca)
 
-                cost = np.sum((pred_pca - self.goal_pca) ** 2)
-                costs.append(cost)
-
-        # Select best action
-        best_idx = np.argmin(costs)
-        best_force = self.controller.candidate_forces[best_idx]
-
-        # Execute action
+        # Execute action in the environment
         self.state, self.done = self.env.step(best_force)
 
-        # Update persistent hidden state
-        with torch.no_grad():
-            new_state_tensor = torch.from_numpy(self.state).unsqueeze(0).to(self.device)
-            action_tensor = torch.tensor([[best_force]], dtype=torch.float32,
-                                          device=self.device)
-            _, _, self.hidden = self.model.forward_step(
-                new_state_tensor, action_tensor, self.hidden
-            )
+        # Update controller's persistent hidden state
+        self.controller.update(self.state, best_force)
 
-            # Get representation for trajectory
-            embedding = self.model.encoder(new_state_tensor)
-            # Use the h output from LSTM (already computed in forward_step)
+        # Get 64D representation for trajectory PCA panel
+        with torch.no_grad():
             repr_pca = self.pca.transform(
-                self.hidden[0].squeeze(0).cpu().numpy()
+                self.controller.hidden[0].squeeze(0).cpu().numpy()
             )[0]
 
         self.trajectory_pca.append(repr_pca)
