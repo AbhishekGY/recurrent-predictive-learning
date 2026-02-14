@@ -9,10 +9,9 @@ __pycache__/
 dist/
 build/
 
-# Data, checkpoints, and plots (generated files)
+# Data and checkpoints (generated during training)
 data/
 checkpoints/
-plots/
 
 # IDE
 .idea/
