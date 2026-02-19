@@ -20,23 +20,27 @@ from pendulum.model import RPLModel
 
 class PredictiveController:
     """
-    One-step lookahead controller using RPL's learned forward model.
+    Random shooting controller using RPL's learned forward model.
 
-    Evaluates candidate forces by predicting their outcomes in latent space,
-    then selects the action that brings the predicted next state closest
-    to the goal embedding (upright, centered pendulum).
+    Samples N random force sequences of length H, rolls each out through
+    the learned forward model, accumulates cost across all H steps, and
+    picks the first action of the lowest-cost sequence.
     """
 
     def __init__(
         self,
         model: RPLModel,
         candidate_forces: list[float] = None,
+        horizon: int = 5,
+        num_samples: int = 200,
         device: torch.device = torch.device("cpu"),
     ):
         self.model = model
         self.model.eval()
         self.device = device
         self.candidate_forces = candidate_forces or [-10.0, -5.0, 0.0, 5.0, 10.0]
+        self.horizon = horizon
+        self.num_samples = num_samples
 
         # Compute goal embedding: upright, centered, stationary
         goal_state = torch.tensor([[0.0, 0.0, 0.0, 0.0]], device=device)
@@ -52,10 +56,11 @@ class PredictiveController:
 
     def select_action(self, state: np.ndarray) -> float:
         """
-        Select the best control action for the current state.
+        Select the best control action via random shooting.
 
-        Evaluates each candidate force by predicting the resulting next
-        state embedding, then picks the one closest to the goal.
+        Samples num_samples random force sequences of length horizon,
+        rolls each out through the learned forward model, accumulates
+        cost, and returns the first action of the lowest-cost sequence.
 
         Args:
             state: Current state as numpy array [x, v_x, theta, omega]
@@ -63,26 +68,46 @@ class PredictiveController:
         Returns:
             Best force to apply (float)
         """
-        state_tensor = torch.from_numpy(state).unsqueeze(0).to(self.device)
+        state_tensor = torch.from_numpy(state).unsqueeze(0).to(self.device)  # (1, 4)
 
-        costs = []
+        best_cost = float('inf')
+        best_first_force = 0.0
+
         with torch.no_grad():
-            for force in self.candidate_forces:
-                force_tensor = torch.tensor([[force]], dtype=torch.float32, device=self.device)
+            # Encode current state once (shared across all samples)
+            z_current = self.model.encoder(state_tensor)  # (1, 32)
 
-                # Predict next embedding for this hypothetical action
-                # Uses current hidden state but does NOT persist the result
-                z_next_pred = self.model.predict_for_action(
-                    state_tensor, force_tensor, self.hidden
-                )
+            for i in range(self.num_samples):
+                # Sample a random force sequence
+                force_sequence = np.random.uniform(-10, 10, size=self.horizon)
 
-                # Cost = distance to goal in latent space
-                cost = torch.norm(z_next_pred - self.z_goal) ** 2
-                costs.append(cost.item())
+                # Roll out this sequence through the forward model
+                # Start from current hidden state (don't modify self.hidden)
+                h = self.hidden
+                z = z_current
+                total_cost = 0.0
 
-        # Select action with lowest cost
-        best_idx = np.argmin(costs)
-        return self.candidate_forces[best_idx]
+                for force in force_sequence:
+                    force_tensor = torch.tensor(
+                        [[force]], dtype=torch.float32, device=self.device
+                    )
+
+                    # One step through integrator + predictor
+                    h_out, h = self.model.integrator(z, force_tensor, h)
+                    z_next_pred = self.model.predictor(h_out)
+
+                    # Accumulate cost (distance to goal in latent space)
+                    cost = torch.norm(z_next_pred - self.z_goal) ** 2
+                    total_cost += cost.item()
+
+                    # Next step uses predicted embedding as input
+                    z = z_next_pred
+
+                if total_cost < best_cost:
+                    best_cost = total_cost
+                    best_first_force = force_sequence[0]
+
+        return best_first_force
 
     def update(self, state: np.ndarray, action: float):
         """
@@ -208,6 +233,18 @@ def main():
         help="Random seed (default: 42)",
     )
     parser.add_argument(
+        "--horizon",
+        type=int,
+        default=5,
+        help="Random shooting lookahead horizon (default: 5)",
+    )
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=200,
+        help="Number of random trajectories to sample (default: 200)",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="auto",
@@ -229,6 +266,7 @@ def main():
     print(f"Episodes: {args.num_episodes}")
     print(f"Max steps: {args.max_steps}")
     print(f"Initial angle range: ±{args.angle_range} rad")
+    print(f"Horizon: {args.horizon}, Samples: {args.num_samples}")
     print(f"Device: {device}")
 
     # Load model
@@ -239,7 +277,9 @@ def main():
     model.to(device)
 
     # Create controller and environment
-    controller = PredictiveController(model, device=device)
+    controller = PredictiveController(
+        model, horizon=args.horizon, num_samples=args.num_samples, device=device,
+    )
     env = InvertedPendulum()
 
     # Run random baseline
