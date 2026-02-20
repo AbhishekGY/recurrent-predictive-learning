@@ -56,11 +56,12 @@ class PredictiveController:
 
     def select_action(self, state: np.ndarray) -> float:
         """
-        Select the best control action via random shooting.
+        Select the best control action via batched random shooting.
 
         Samples num_samples random force sequences of length horizon,
-        rolls each out through the learned forward model, accumulates
-        cost, and returns the first action of the lowest-cost sequence.
+        rolls all of them out simultaneously through the learned forward
+        model, accumulates cost, and returns the first action of the
+        lowest-cost sequence.
 
         Args:
             state: Current state as numpy array [x, v_x, theta, omega]
@@ -70,42 +71,47 @@ class PredictiveController:
         """
         state_tensor = torch.from_numpy(state).unsqueeze(0).to(self.device)  # (1, 4)
 
-        best_cost = float('inf')
-        best_first_force = 0.0
-
         with torch.no_grad():
-            # Encode current state once (shared across all samples)
+            # Encode current state once
             z_current = self.model.encoder(state_tensor)  # (1, 32)
 
-            for i in range(self.num_samples):
-                # Sample a random force sequence
-                force_sequence = np.random.uniform(-10, 10, size=self.horizon)
+            # Sample all force sequences at once
+            # shape: (num_samples, horizon)
+            force_sequences = torch.FloatTensor(
+                self.num_samples, self.horizon
+            ).uniform_(-10, 10).to(self.device)
 
-                # Roll out this sequence through the forward model
-                # Start from current hidden state (don't modify self.hidden)
-                h = self.hidden
-                z = z_current
-                total_cost = 0.0
+            # Expand z_current and hidden state to batch size num_samples
+            z = z_current.expand(self.num_samples, -1)  # (num_samples, 32)
 
-                for force in force_sequence:
-                    force_tensor = torch.tensor(
-                        [[force]], dtype=torch.float32, device=self.device
-                    )
+            # Expand hidden state to match batch size
+            if self.hidden is None:
+                h = None
+            else:
+                h = (
+                    self.hidden[0].expand(-1, self.num_samples, -1).contiguous(),
+                    self.hidden[1].expand(-1, self.num_samples, -1).contiguous(),
+                )
 
-                    # One step through integrator + predictor
-                    h_out, h = self.model.integrator(z, force_tensor, h)
-                    z_next_pred = self.model.predictor(h_out)
+            # Expand goal to match batch size
+            z_goal = self.z_goal.expand(self.num_samples, -1)  # (num_samples, 32)
 
-                    # Accumulate cost (distance to goal in latent space)
-                    cost = torch.norm(z_next_pred - self.z_goal) ** 2
-                    total_cost += cost.item()
+            total_costs = torch.zeros(self.num_samples, device=self.device)
 
-                    # Next step uses predicted embedding as input
-                    z = z_next_pred
+            # Roll out all samples in parallel across the horizon
+            for t in range(self.horizon):
+                forces_t = force_sequences[:, t].unsqueeze(1)  # (num_samples, 1)
 
-                if total_cost < best_cost:
-                    best_cost = total_cost
-                    best_first_force = force_sequence[0]
+                h_out, h = self.model.integrator(z, forces_t, h)  # h_out: (num_samples, 64)
+                z = self.model.predictor(h_out)  # (num_samples, 32)
+
+                # Accumulate cost for all samples simultaneously
+                cost = ((z - z_goal) ** 2).sum(dim=1)  # (num_samples,)
+                total_costs += cost
+
+            # Pick the first force of the lowest-cost trajectory
+            best_idx = total_costs.argmin()
+            best_first_force = force_sequences[best_idx, 0].item()
 
         return best_first_force
 

@@ -4,7 +4,7 @@ Real-Time Visualization for RPL Inverted Pendulum Control
 Displays a three-panel animation during a control episode:
 - Left:   Physical pendulum simulation (cart + pole)
 - Center: LSTM representation trajectory in PCA space
-- Right:  Predicted next embeddings for each candidate action
+- Right:  Best trajectory rollout in PCA space (from random shooting)
 
 Usage:
     python -m pendulum.animate --checkpoint checkpoints/rpl_model_final.pt --save pendulum.gif
@@ -52,7 +52,7 @@ class PendulumAnimator:
 
     Left:   Cart-pole rendering
     Center: PCA trajectory of LSTM hidden state
-    Right:  Candidate action predictions in PCA space
+    Right:  Best trajectory rollout in PCA space
     """
 
     def __init__(
@@ -142,35 +142,46 @@ class PendulumAnimator:
                 markeredgewidth=1, zorder=6, label='Goal')
         ax.legend(loc='upper right', fontsize=8)
 
-        # Right panel: Action predictions
+        # Right panel: Best trajectory rollout
         ax = self.axes[2]
-        ax.set_title('Action Predictions (PCA)')
+        ax.set_title('Best Trajectory (PCA)')
         ax.set_xlabel('PC1')
         ax.set_ylabel('PC2')
-        self.pred_scatters = []
-        self.pred_labels = []
-
-        # Create scatter and label for each candidate force
-        force_colors = plt.cm.coolwarm(np.linspace(0, 1, len(self.controller.candidate_forces)))
-        for i, force in enumerate(self.controller.candidate_forces):
-            sc, = ax.plot([], [], 'o', color=force_colors[i], markersize=10)
-            label = ax.text(0, 0, f'{force:+.0f}N', fontsize=7,
-                           ha='left', va='bottom')
-            self.pred_scatters.append(sc)
-            self.pred_labels.append(label)
-
-        self.selected_ring, = ax.plot([], [], 'o', markersize=16,
-                                      markerfacecolor='none',
-                                      markeredgecolor='black',
-                                      markeredgewidth=2)
-        self.current_ref, = ax.plot([], [], 'x', color='gray', markersize=10,
-                                    markeredgewidth=2, label='Current')
+        self.traj_line, = ax.plot([], [], 'b-o', markersize=5, linewidth=1.5,
+                                   alpha=0.7, label='Best rollout')
+        self.traj_start, = ax.plot([], [], 'gs', markersize=10, label='Current')
         ax.plot(self.goal_pca[0], self.goal_pca[1], '*',
                 color='gold', markersize=15, markeredgecolor='black',
                 markeredgewidth=1, zorder=6, label='Goal')
         ax.legend(loc='upper right', fontsize=8)
 
         self.fig.subplots_adjust(left=0.05, right=0.95, wspace=0.3)
+
+    def _get_best_trajectory_pca(self, state: np.ndarray, best_force: float) -> np.ndarray:
+        """
+        Roll out the best force sequence through the model and return
+        PCA-projected hidden states for each step.
+        """
+        state_tensor = torch.from_numpy(state).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            z = self.model.encoder(state_tensor)
+            h = self.controller.hidden
+
+            # Use best_force as first step, then zeros for remainder
+            # This shows where the best first action leads
+            forces = [best_force] + [0.0] * (self.controller.horizon - 1)
+
+            pca_points = []
+            for force in forces:
+                force_tensor = torch.tensor([[force]], dtype=torch.float32,
+                                            device=self.device)
+                h_out, h = self.model.integrator(z, force_tensor, h)
+                z = self.model.predictor(h_out)
+                pca_pt = self.pca.transform(h_out.cpu().numpy())[0]
+                pca_points.append(pca_pt)
+
+        return np.array(pca_points)
 
     def _reset_episode(self):
         """Reset for a new episode."""
@@ -187,24 +198,11 @@ class PendulumAnimator:
 
         state = self.state
 
-        # --- Select action using the real controller (same as control.py) ---
+        # --- Select action using the real controller (random shooting) ---
         best_force = self.controller.select_action(state)
-        best_idx = self.controller.candidate_forces.index(best_force)
 
-        # --- Collect 64D LSTM representations for visualization only ---
-        state_tensor = torch.from_numpy(state).unsqueeze(0).to(self.device)
-        pred_pcas = []
-
-        with torch.no_grad():
-            z_current = self.model.encoder(state_tensor)
-            for force in self.controller.candidate_forces:
-                force_tensor = torch.tensor([[force]], dtype=torch.float32,
-                                            device=self.device)
-                h_hyp, _ = self.model.integrator(
-                    z_current, force_tensor, self.controller.hidden
-                )
-                pred_pca = self.pca.transform(h_hyp.cpu().numpy())[0]
-                pred_pcas.append(pred_pca)
+        # --- Get best trajectory rollout for visualization ---
+        traj_pca = self._get_best_trajectory_pca(state, best_force)
 
         # Execute action in the environment
         self.state, self.done = self.env.step(best_force)
@@ -264,26 +262,15 @@ class PendulumAnimator:
             ax.set_xlim(traj[:, 0].min() - margin, traj[:, 0].max() + margin)
             ax.set_ylim(traj[:, 1].min() - margin, traj[:, 1].max() + margin)
 
-        # --- Update Right Panel: Action predictions ---
-        pred_arr = np.array(pred_pcas)
-        for i, (sc, label, pca_pt) in enumerate(
-            zip(self.pred_scatters, self.pred_labels, pred_pcas)
-        ):
-            sc.set_data([pca_pt[0]], [pca_pt[1]])
-            label.set_position((pca_pt[0] + 0.05, pca_pt[1] + 0.05))
-
-        # Highlight selected action
-        self.selected_ring.set_data([pred_pcas[best_idx][0]],
-                                    [pred_pcas[best_idx][1]])
-
-        # Show current position reference
+        # --- Update Right Panel: Best trajectory rollout ---
+        self.traj_line.set_data(traj_pca[:, 0], traj_pca[:, 1])
         if len(self.trajectory_pca) > 0:
-            self.current_ref.set_data([self.trajectory_pca[-1][0]],
+            self.traj_start.set_data([self.trajectory_pca[-1][0]],
                                       [self.trajectory_pca[-1][1]])
 
         # Auto-scale right panel
         ax = self.axes[2]
-        all_pts = np.vstack([pred_arr, [self.goal_pca]])
+        all_pts = np.vstack([traj_pca, [self.goal_pca]])
         if len(self.trajectory_pca) > 0:
             all_pts = np.vstack([all_pts, [self.trajectory_pca[-1]]])
         margin = 0.5
@@ -347,6 +334,10 @@ def main():
         "--save", type=str, default="plots/pendulum_control.gif",
         help="Save animation to file (GIF or MP4)",
     )
+    parser.add_argument("--horizon", type=int, default=5,
+                        help="Random shooting lookahead horizon")
+    parser.add_argument("--num_samples", type=int, default=200,
+                        help="Number of random trajectories to sample")
     parser.add_argument("--device", type=str, default="auto")
 
     args = parser.parse_args()
@@ -359,6 +350,7 @@ def main():
     print("=== RPL Pendulum Animation ===")
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Max steps: {args.max_steps}")
+    print(f"Horizon: {args.horizon}, Samples: {args.num_samples}")
     print(f"Save to: {args.save}")
 
     # Load model
@@ -377,7 +369,9 @@ def main():
 
     # Create environment and controller
     env = InvertedPendulum()
-    controller = PredictiveController(model, device=device)
+    controller = PredictiveController(
+        model, horizon=args.horizon, num_samples=args.num_samples, device=device
+    )
 
     # Create animator
     animator = PendulumAnimator(
