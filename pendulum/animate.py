@@ -334,6 +334,10 @@ def main():
         "--save", type=str, default="plots/pendulum_control.gif",
         help="Save animation to file (GIF or MP4)",
     )
+    parser.add_argument("--horizon", type=int, default=5,
+                        help="Random shooting lookahead horizon")
+    parser.add_argument("--num_samples", type=int, default=200,
+                        help="Number of random trajectories to sample")
     parser.add_argument("--device", type=str, default="auto")
 
     args = parser.parse_args()
@@ -346,6 +350,7 @@ def main():
     print("=== RPL Pendulum Animation ===")
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Max steps: {args.max_steps}")
+    print(f"Horizon: {args.horizon}, Samples: {args.num_samples}")
     print(f"Save to: {args.save}")
 
     # Load model
@@ -364,7 +369,9 @@ def main():
 
     # Create environment and controller
     env = InvertedPendulum()
-    controller = PredictiveController(model, device=device)
+    controller = PredictiveController(
+        model, horizon=args.horizon, num_samples=args.num_samples, device=device
+    )
 
     # Create animator
     animator = PendulumAnimator(
