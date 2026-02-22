@@ -140,6 +140,7 @@ def run_episode(
     max_steps: int = 500,
     angle_range: float = 0.05,
     omega_range: float = 0.05,
+    control_every_n: int = 1,
 ) -> dict:
     """
     Run a single control episode.
@@ -150,6 +151,7 @@ def run_episode(
         max_steps: Maximum timesteps per episode
         angle_range: Initial angle perturbation
         omega_range: Initial angular velocity perturbation
+        control_every_n: Replan every N timesteps, holding force constant between replans
 
     Returns:
         Dictionary with episode data
@@ -162,26 +164,39 @@ def run_episode(
 
     done = False
     step = 0
+    current_force = 0.0
 
     while not done and step < max_steps:
-        # Select action using the learned model
-        force = controller.select_action(state)
-        forces.append(force)
+        # Replan every N steps
+        if step % control_every_n == 0:
+            current_force = controller.select_action(state)
+
+        forces.append(current_force)
 
         # Execute in the real environment
-        state, done = env.step(force)
+        state, done = env.step(current_force)
         states.append(state.copy())
 
-        # Update persistent hidden state with actual outcome
-        controller.update(state, force)
+        # Update persistent hidden state every timestep with actual outcome
+        controller.update(state, current_force)
 
         step += 1
+
+    # Determine termination cause
+    termination_cause = 'survived'
+    if done:
+        x, _, theta, _ = state
+        if abs(theta) > np.pi / 2:
+            termination_cause = 'angle'
+        elif abs(x) >= env.track_limit:
+            termination_cause = 'cart_boundary'
 
     return {
         'states': np.array(states),
         'forces': np.array(forces),
         'length': step,
         'survived': not done,
+        'termination_cause': termination_cause,
     }
 
 
@@ -256,6 +271,12 @@ def main():
         default="auto",
         help="Device: 'cpu', 'cuda', or 'auto'",
     )
+    parser.add_argument(
+        "--control_every_n",
+        type=int,
+        default=1,
+        help="Replan every N timesteps, holding force constant between replans (default: 1)",
+    )
 
     args = parser.parse_args()
 
@@ -273,6 +294,7 @@ def main():
     print(f"Max steps: {args.max_steps}")
     print(f"Initial angle range: ±{args.angle_range} rad")
     print(f"Horizon: {args.horizon}, Samples: {args.num_samples}")
+    print(f"Control every N steps: {args.control_every_n}")
     print(f"Device: {device}")
 
     # Load model
@@ -306,6 +328,7 @@ def main():
         result = run_episode(
             env, controller, args.max_steps,
             args.angle_range, args.angle_range,
+            control_every_n=args.control_every_n,
         )
         rpl_lengths.append(result['length'])
 
