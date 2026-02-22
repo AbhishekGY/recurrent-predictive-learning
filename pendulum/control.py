@@ -111,14 +111,18 @@ class PredictiveController:
                 cost = ((z - z_goal) ** 2).sum(dim=1)  # (num_samples,)
                 total_costs += cost
 
-            # Cart penalty based on current actual state
-            # Penalize cart position and velocity to prevent boundary drift
+            # Cart penalty: bias toward actions that push cart back toward center
             x_current = state[0]
             vx_current = state[1]
 
-            # Add to all samples equally (current state is same for all trajectories)
-            cart_penalty = self.cart_penalty_weight * (x_current ** 2 + 0.1 * vx_current ** 2)
-            total_costs += cart_penalty  # broadcasts to all samples
+            # Penalize first force that has same sign as cart position
+            # (i.e., pushes cart further from center)
+            first_forces = force_sequences[:, 0]  # (num_samples,)
+            cart_penalty = self.cart_penalty_weight * (
+                x_current * first_forces +  # penalize forces in same direction as x
+                0.1 * vx_current * first_forces  # penalize forces in same direction as vx
+            )
+            total_costs += cart_penalty
 
             # Pick the first force of the lowest-cost trajectory
             best_idx = total_costs.argmin()
