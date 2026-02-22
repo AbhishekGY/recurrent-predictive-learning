@@ -338,6 +338,8 @@ def main():
                         help="Random shooting lookahead horizon")
     parser.add_argument("--num_samples", type=int, default=200,
                         help="Number of random trajectories to sample")
+    parser.add_argument("--cart_penalty_weight", type=float, default=0.04,
+                        help="Weight for cart position penalty (default: 0.04)")
     parser.add_argument("--device", type=str, default="auto")
 
     args = parser.parse_args()
@@ -370,7 +372,8 @@ def main():
     # Create environment and controller
     env = InvertedPendulum()
     controller = PredictiveController(
-        model, horizon=args.horizon, num_samples=args.num_samples, device=device
+        model, horizon=args.horizon, num_samples=args.num_samples,
+        cart_penalty_weight=args.cart_penalty_weight, device=device,
     )
 
     # Create animator
