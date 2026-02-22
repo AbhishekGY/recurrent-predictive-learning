@@ -30,6 +30,7 @@ def run_diagnostic_episode(
     device: torch.device,
     max_steps: int = 500,
     seed: int = 42,
+    cart_penalty_weight: float = 0.04,
 ) -> dict:
     """Run one control episode and collect per-step diagnostic data."""
     np.random.seed(seed)
@@ -37,7 +38,8 @@ def run_diagnostic_episode(
 
     env = InvertedPendulum()
     controller = PredictiveController(
-        model, horizon=5, num_samples=200, device=device
+        model, horizon=5, num_samples=200,
+        cart_penalty_weight=cart_penalty_weight, device=device,
     )
 
     M, m, L, g = env.M, env.m, env.L, env.g
@@ -174,6 +176,7 @@ def main():
                         default="plots/torque_diagnostics.png")
     parser.add_argument("--max_steps", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--cart_penalty_weight", type=float, default=0.04)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 
@@ -191,7 +194,8 @@ def main():
         param.requires_grad = False
 
     print("Running diagnostic episode...")
-    data = run_diagnostic_episode(model, device, args.max_steps, args.seed)
+    data = run_diagnostic_episode(model, device, args.max_steps, args.seed,
+                                   args.cart_penalty_weight)
 
     plot_diagnostics(data, Path(args.output))
 
