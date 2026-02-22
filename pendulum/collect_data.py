@@ -68,6 +68,8 @@ def collect_dataset(
     max_steps: int,
     angle_range: float,
     omega_range: float,
+    x_range: float = 0.0,
+    vx_range: float = 0.0,
     seed: int = 42,
 ) -> list:
     """
@@ -78,6 +80,8 @@ def collect_dataset(
         max_steps: Maximum steps per episode
         angle_range: Initial angle perturbation range
         omega_range: Initial angular velocity range
+        x_range: Initial cart position range
+        vx_range: Initial cart velocity range
         seed: Random seed for reproducibility
 
     Returns:
@@ -93,8 +97,8 @@ def collect_dataset(
         env.reset(
             angle_range=angle_range,
             omega_range=omega_range,
-            x_range=0.0,
-            vx_range=0.0,
+            x_range=x_range,
+            vx_range=vx_range,
         )
 
         # Collect episode
@@ -165,6 +169,18 @@ def main():
         help="Initial angular velocity range in rad/s (default: 0.2)",
     )
     parser.add_argument(
+        "--x_range",
+        type=float,
+        default=0.0,
+        help="Initial cart position range (default: 0.0)",
+    )
+    parser.add_argument(
+        "--vx_range",
+        type=float,
+        default=0.0,
+        help="Initial cart velocity range (default: 0.0)",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -178,6 +194,8 @@ def main():
     print(f"Max steps per episode: {args.max_steps}")
     print(f"Initial angle range: ±{args.angle_range} rad")
     print(f"Initial omega range: ±{args.omega_range} rad/s")
+    print(f"Initial x range: ±{args.x_range} m")
+    print(f"Initial vx range: ±{args.vx_range} m/s")
     print(f"Output path: {args.output_path}")
     print(f"Random seed: {args.seed}")
     print()
@@ -188,6 +206,8 @@ def main():
         max_steps=args.max_steps,
         angle_range=args.angle_range,
         omega_range=args.omega_range,
+        x_range=args.x_range,
+        vx_range=args.vx_range,
         seed=args.seed,
     )
 
