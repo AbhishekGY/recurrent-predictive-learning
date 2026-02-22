@@ -33,6 +33,7 @@ class PredictiveController:
         candidate_forces: list[float] = None,
         horizon: int = 5,
         num_samples: int = 200,
+        cart_penalty_weight: float = 1.0,
         device: torch.device = torch.device("cpu"),
     ):
         self.model = model
@@ -41,6 +42,7 @@ class PredictiveController:
         self.candidate_forces = candidate_forces or [-10.0, -5.0, 0.0, 5.0, 10.0]
         self.horizon = horizon
         self.num_samples = num_samples
+        self.cart_penalty_weight = cart_penalty_weight
 
         # Compute goal embedding: upright, centered, stationary
         goal_state = torch.tensor([[0.0, 0.0, 0.0, 0.0]], device=device)
@@ -108,6 +110,15 @@ class PredictiveController:
                 # Accumulate cost for all samples simultaneously
                 cost = ((z - z_goal) ** 2).sum(dim=1)  # (num_samples,)
                 total_costs += cost
+
+            # Cart penalty based on current actual state
+            # Penalize cart position and velocity to prevent boundary drift
+            x_current = state[0]
+            vx_current = state[1]
+
+            # Add to all samples equally (current state is same for all trajectories)
+            cart_penalty = self.cart_penalty_weight * (x_current ** 2 + 0.1 * vx_current ** 2)
+            total_costs += cart_penalty  # broadcasts to all samples
 
             # Pick the first force of the lowest-cost trajectory
             best_idx = total_costs.argmin()
@@ -177,11 +188,21 @@ def run_episode(
 
         step += 1
 
+    # Determine termination cause
+    final_state = states[-1]
+    if not done:
+        termination = 'survived'
+    elif abs(final_state[0]) >= 2.0:
+        termination = 'cart_boundary'
+    else:
+        termination = 'angle_limit'
+
     return {
         'states': np.array(states),
         'forces': np.array(forces),
         'length': step,
         'survived': not done,
+        'termination': termination,
     }
 
 
@@ -251,6 +272,12 @@ def main():
         help="Number of random trajectories to sample (default: 200)",
     )
     parser.add_argument(
+        "--cart_penalty_weight",
+        type=float,
+        default=1.0,
+        help="Weight for cart position penalty in cost function (default: 1.0)",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="auto",
@@ -273,6 +300,7 @@ def main():
     print(f"Max steps: {args.max_steps}")
     print(f"Initial angle range: ±{args.angle_range} rad")
     print(f"Horizon: {args.horizon}, Samples: {args.num_samples}")
+    print(f"Cart penalty weight: {args.cart_penalty_weight}")
     print(f"Device: {device}")
 
     # Load model
@@ -284,7 +312,11 @@ def main():
 
     # Create controller and environment
     controller = PredictiveController(
-        model, horizon=args.horizon, num_samples=args.num_samples, device=device,
+        model,
+        horizon=args.horizon,
+        num_samples=args.num_samples,
+        cart_penalty_weight=args.cart_penalty_weight,
+        device=device,
     )
     env = InvertedPendulum()
 
@@ -302,12 +334,14 @@ def main():
     # Run RPL controller
     print(f"\nRunning RPL controller ({args.num_episodes} episodes)...")
     rpl_lengths = []
+    termination_counts = {'survived': 0, 'angle_limit': 0, 'cart_boundary': 0}
     for i in range(args.num_episodes):
         result = run_episode(
             env, controller, args.max_steps,
             args.angle_range, args.angle_range,
         )
         rpl_lengths.append(result['length'])
+        termination_counts[result['termination']] += 1
 
         if (i + 1) % 10 == 0:
             recent = rpl_lengths[-10:]
@@ -329,12 +363,19 @@ def main():
     improvement = np.mean(rpl_lengths) / max(np.mean(random_lengths), 1)
     print(f"\nImprovement: {improvement:.1f}x longer balance time")
 
+    # Termination cause breakdown
+    total = sum(termination_counts.values())
+    print(f"\nTermination causes:")
+    print(f"  Angle limit:    {termination_counts['angle_limit']:3d} ({100*termination_counts['angle_limit']/total:.1f}%)")
+    print(f"  Cart boundary:  {termination_counts['cart_boundary']:3d} ({100*termination_counts['cart_boundary']/total:.1f}%)")
+    print(f"  Survived:       {termination_counts['survived']:3d} ({100*termination_counts['survived']/total:.1f}%)")
+
     if improvement > 2:
-        print("✓ RPL controller significantly outperforms random control!")
+        print("\n✓ RPL controller significantly outperforms random control!")
     elif improvement > 1.2:
-        print("~ RPL controller shows moderate improvement")
+        print("\n~ RPL controller shows moderate improvement")
     else:
-        print("✗ RPL controller needs more training to show clear improvement")
+        print("\n✗ RPL controller needs more training to show clear improvement")
 
 
 if __name__ == "__main__":
