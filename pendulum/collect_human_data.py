@@ -6,9 +6,9 @@ episodes. Data is stored in the same format as random exploration so both
 datasets can be merged directly.
 
 Controls:
-    LEFT ARROW  -> apply force -F N
-    RIGHT ARROW -> apply force +F N
-    DOWN ARROW  -> apply force 0 N (brake)
+    LEFT ARROW  -> apply force -F N (sticky: stays until you press another key)
+    RIGHT ARROW -> apply force +F N (sticky: stays until you press another key)
+    DOWN ARROW  -> brake (set force to 0)
     R           -> reset episode (saves if long enough)
     S           -> save dataset and quit
     Q           -> quit (keeps previously completed episodes)
@@ -126,7 +126,12 @@ def main():
     )
     parser.add_argument(
         "--fps", type=int, default=50,
-        help="Simulation and render rate in Hz (default: 50)",
+        help="Max render frame rate in Hz (default: 50)",
+    )
+    parser.add_argument(
+        "--slow_factor", type=float, default=0.5,
+        help="Slow-motion factor: 1.0 = real-time, 0.5 = half speed, "
+             "0.25 = quarter speed (default: 0.5)",
     )
     args = parser.parse_args()
 
@@ -157,8 +162,13 @@ def main():
     font_med = pygame.font.SysFont("monospace", 16)
     font_small = pygame.font.SysFont("monospace", 13)
 
-    env = InvertedPendulum(dt=1.0 / args.fps)
+    env = InvertedPendulum()  # always dt=0.02 (50Hz physics)
     track_limit = env.track_limit
+
+    # Effective render fps: slow_factor=1.0 -> 50fps (real-time),
+    # slow_factor=0.5 -> 25fps (half speed), etc.
+    physics_hz = 1.0 / env.dt
+    render_fps = min(args.fps, int(physics_hz * args.slow_factor))
 
     # ------------------------------------------------------------------
     # Episode state
@@ -174,6 +184,7 @@ def main():
     flash_color = FLASH_SAVE
     flash_until = 0.0
     running = True
+    sticky_force = 0.0  # persists until a different key is pressed
 
     def finish_episode(reason: str = ""):
         """Finalise current episode, save if long enough, auto-reset."""
@@ -226,20 +237,20 @@ def main():
                     flash_until = time.time() + 2.0
                     running = False
                 elif event.key == pygame.K_r:
+                    sticky_force = 0.0
                     finish_episode("(manual reset)")
+                elif event.key == pygame.K_LEFT:
+                    sticky_force = -args.force_magnitude
+                elif event.key == pygame.K_RIGHT:
+                    sticky_force = args.force_magnitude
+                elif event.key == pygame.K_DOWN:
+                    sticky_force = 0.0
 
         if not running:
             break
 
-        # --- Determine force from held keys ---
-        keys = pygame.key.get_pressed()
-        force = 0.0
-        if keys[pygame.K_LEFT]:
-            force -= args.force_magnitude
-        if keys[pygame.K_RIGHT]:
-            force += args.force_magnitude
-        if keys[pygame.K_DOWN]:
-            force = 0.0
+        # Sticky force: keeps last direction until a new key is pressed
+        force = sticky_force
 
         # --- Physics step ---
         if not done and step < args.max_steps_per_episode:
@@ -365,15 +376,15 @@ def main():
         # ---- Control hints bar (bottom) ----
         hints_y = SCREEN_HEIGHT - HINTS_HEIGHT
         pygame.draw.rect(screen, HINT_BG, (0, hints_y, SCREEN_WIDTH, HINTS_HEIGHT))
-        hints = ("LEFT: push left  |  RIGHT: push right  |  "
-                 "DOWN: zero force  |  R: reset episode  |  "
-                 "S: save & quit  |  Q: quit")
+        hints = ("LEFT: push left (sticky)  |  RIGHT: push right (sticky)  |  "
+                 "DOWN: brake  |  R: reset  |  "
+                 f"S: save & quit  |  Q: quit  |  speed: {args.slow_factor}x")
         surf = font_small.render(hints, True, DIM_TEXT)
         rect = surf.get_rect(center=(SCREEN_WIDTH // 2, hints_y + HINTS_HEIGHT // 2))
         screen.blit(surf, rect)
 
         pygame.display.flip()
-        clock.tick(args.fps)
+        clock.tick(render_fps)
 
     # ------------------------------------------------------------------
     # Cleanup
