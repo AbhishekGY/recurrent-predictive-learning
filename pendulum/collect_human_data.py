@@ -133,6 +133,11 @@ def main():
         help="Slow-motion factor: 1.0 = real-time, 0.5 = half speed, "
              "0.25 = quarter speed (default: 0.5)",
     )
+    parser.add_argument(
+        "--track_limit", type=float, default=2.0,
+        help="Half-width of the cart track in metres (default: 2.0, same as "
+             "training env). Increase for more recovery room.",
+    )
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
@@ -162,7 +167,7 @@ def main():
     font_med = pygame.font.SysFont("monospace", 16)
     font_small = pygame.font.SysFont("monospace", 13)
 
-    env = InvertedPendulum()  # always dt=0.02 (50Hz physics)
+    env = InvertedPendulum(track_limit=args.track_limit)
     track_limit = env.track_limit
 
     # Effective render fps: slow_factor=1.0 -> 50fps (real-time),
