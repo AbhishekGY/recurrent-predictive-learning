@@ -22,15 +22,19 @@ from pendulum.model import RPLModel
 
 def collect_test_episodes(
     num_episodes: int = 200,
-    max_steps: int = 200,
-    angle_range: float = 0.2,
-    omega_range: float = 0.2,
+    max_steps: int = 500,
+    theta_range: float = 1.0,
+    omega_range: float = 1.0,
+    x_range: float = 0.5,
+    vx_range: float = 0.3,
     seed: int = 12345,  # Different from training seed
 ) -> list:
     """
-    Collect fresh test episodes for evaluation.
+    Collect fresh passive test episodes for evaluation.
 
     Uses a different seed than training to ensure held-out data.
+    Episodes use zero force (passive dynamics) and terminate only
+    on cart boundary or max steps.
     """
     np.random.seed(seed)
 
@@ -39,29 +43,24 @@ def collect_test_episodes(
 
     for i in range(num_episodes):
         env.reset(
-            angle_range=angle_range,
+            angle_range=theta_range,
             omega_range=omega_range,
-            x_range=0.0,
-            vx_range=0.0,
+            x_range=x_range,
+            vx_range=vx_range,
         )
 
         states = [env.get_state().copy()]
-        forces = []
 
         done = False
         step = 0
 
         while not done and step < max_steps:
-            force = np.random.uniform(-10, 10)
-            forces.append([force])
-
-            state, done = env.step(force)
+            state, done = env.step(0.0)
             states.append(state.copy())
             step += 1
 
         episodes.append({
             'states': np.array(states, dtype=np.float32),
-            'forces': np.array(forces, dtype=np.float32),
         })
 
     return episodes
@@ -76,7 +75,7 @@ def collect_representations(
     Run the trained model on episodes and collect internal representations.
 
     For each timestep t, we collect:
-    - The LSTM hidden state h_t (after processing state_t and action_t)
+    - The LSTM hidden state h_t (after processing state_t)
     - The corresponding next state state_{t+1} (ground truth for decoding)
 
     Args:
@@ -97,17 +96,15 @@ def collect_representations(
     with torch.no_grad():
         for episode in episodes:
             states = episode['states']  # (T+1, 4)
-            forces = episode['forces']  # (T, 1)
-            T = len(forces)
+            T = len(states) - 1
 
             hidden = None
 
             for t in range(T):
                 state_t = torch.tensor(states[t:t+1], dtype=torch.float32, device=device)
-                action_t = torch.tensor(forces[t:t+1], dtype=torch.float32, device=device)
 
-                # Get representation after processing (state_t, action_t)
-                representation, hidden = model.get_representation(state_t, action_t, hidden)
+                # Get representation after processing state_t
+                representation, hidden = model.get_representation(state_t, hidden)
 
                 # Store representation and corresponding next state
                 all_representations.append(representation.cpu().numpy().flatten())
@@ -171,17 +168,15 @@ def evaluate_prediction_accuracy(
     with torch.no_grad():
         for episode in episodes:
             states = episode['states']
-            forces = episode['forces']
-            T = len(forces)
+            T = len(states) - 1
 
             hidden = None
 
             for t in range(T):
                 state_t = torch.tensor(states[t:t+1], dtype=torch.float32, device=device)
-                action_t = torch.tensor(forces[t:t+1], dtype=torch.float32, device=device)
 
                 # Get prediction for next embedding
-                _, prediction, hidden = model.forward_step(state_t, action_t, hidden)
+                _, prediction, hidden = model.forward_step(state_t, hidden)
 
                 all_predictions.append(prediction.cpu().numpy().flatten())
                 all_next_states.append(states[t + 1])
@@ -243,8 +238,24 @@ def main():
     parser.add_argument(
         "--max_steps",
         type=int,
-        default=200,
-        help="Maximum steps per episode (default: 200)",
+        default=500,
+        help="Maximum steps per episode (default: 500)",
+    )
+    parser.add_argument(
+        "--theta_range", type=float, default=0.8,
+        help="Initial angle range for test episodes (default: 0.8)",
+    )
+    parser.add_argument(
+        "--omega_range", type=float, default=0.8,
+        help="Initial angular velocity range (default: 0.8)",
+    )
+    parser.add_argument(
+        "--x_range", type=float, default=0.5,
+        help="Initial cart position range (default: 0.5)",
+    )
+    parser.add_argument(
+        "--vx_range", type=float, default=0.3,
+        help="Initial cart velocity range (default: 0.3)",
     )
     parser.add_argument(
         "--seed",
@@ -293,10 +304,14 @@ def main():
     episodes = collect_test_episodes(
         num_episodes=args.num_episodes,
         max_steps=args.max_steps,
+        theta_range=args.theta_range,
+        omega_range=args.omega_range,
+        x_range=args.x_range,
+        vx_range=args.vx_range,
         seed=args.seed,
     )
 
-    total_transitions = sum(len(ep['forces']) for ep in episodes)
+    total_transitions = sum(len(ep['states']) - 1 for ep in episodes)
     print(f"Collected {total_transitions:,} transitions")
 
     # Collect representations

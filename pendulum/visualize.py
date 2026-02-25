@@ -56,17 +56,15 @@ def collect_prediction_errors_by_state(
     with torch.no_grad():
         for episode in episodes:
             states = episode['states']
-            forces = episode['forces']
-            T = len(forces)
+            T = len(states) - 1
             hidden = None
 
             for t in range(T):
                 state_t = torch.tensor(states[t:t+1], dtype=torch.float32, device=device)
-                action_t = torch.tensor(forces[t:t+1], dtype=torch.float32, device=device)
                 state_next = torch.tensor(states[t+1:t+2], dtype=torch.float32, device=device)
 
                 # Get prediction
-                _, prediction, hidden = model.forward_step(state_t, action_t, hidden)
+                _, prediction, hidden = model.forward_step(state_t, hidden)
 
                 # Get actual next embedding
                 z_next_actual = model.encoder(state_next)
@@ -270,9 +268,15 @@ def generate_all_plots(
     # Collect test data
     print("Collecting test episodes...")
     episodes = collect_test_episodes(
-        num_episodes=num_episodes, seed=seed,
+        num_episodes=num_episodes,
+        max_steps=500,
+        theta_range=0.8,
+        omega_range=0.8,
+        x_range=0.5,
+        vx_range=0.3,
+        seed=seed,
     )
-    total = sum(len(ep['forces']) for ep in episodes)
+    total = sum(len(ep['states']) - 1 for ep in episodes)
     print(f"  {len(episodes)} episodes, {total:,} transitions")
 
     # Collect representations
@@ -367,7 +371,13 @@ def main():
 
         # Collect common data
         episodes = collect_test_episodes(
-            num_episodes=args.num_episodes, seed=args.seed,
+            num_episodes=args.num_episodes,
+            max_steps=500,
+            theta_range=0.8,
+            omega_range=0.8,
+            x_range=0.5,
+            vx_range=0.3,
+            seed=args.seed,
         )
         representations, next_states = collect_representations(model, episodes, device)
 
