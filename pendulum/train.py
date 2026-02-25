@@ -2,10 +2,10 @@
 Training Script for RPL Model
 
 Loads collected episodes and trains the RPL model to predict
-next state embeddings from current state-action pairs.
+next state embeddings from passive observation sequences.
 
 Usage:
-    python -m pendulum.train --data_path data/random_exploration.pkl --epochs 100
+    python -m pendulum.train --data_path data/passive_swings.pkl --epochs 100
 """
 
 import argparse
@@ -21,7 +21,7 @@ from pendulum.model import RPLModel, compute_prediction_loss
 
 class EpisodeDataset(Dataset):
     """
-    PyTorch Dataset for RPL training episodes.
+    PyTorch Dataset for RPL training episodes (passive observation).
 
     Handles padding/truncating episodes to fixed sequence length and
     provides masks for ignoring padded timesteps in loss computation.
@@ -32,7 +32,7 @@ class EpisodeDataset(Dataset):
         Initialize the dataset.
 
         Args:
-            episodes: List of episode dicts with 'states' and 'forces' keys
+            episodes: List of episode dicts with 'states' key
             seq_len: Fixed sequence length for batching (number of transitions)
         """
         self.episodes = episodes
@@ -48,14 +48,12 @@ class EpisodeDataset(Dataset):
         Returns:
             Tuple of:
                 - states: Tensor of shape (seq_len+1, 4)
-                - actions: Tensor of shape (seq_len, 1)
                 - mask: Boolean tensor of shape (seq_len,) indicating valid timesteps
         """
         episode = self.episodes[idx]
         states = episode['states']  # (T+1, 4)
-        forces = episode['forces']  # (T, 1)
 
-        T = len(forces)  # Number of transitions
+        T = len(states) - 1  # Number of transitions
 
         if T >= self.seq_len:
             # Episode is long enough - randomly sample a contiguous window
@@ -64,23 +62,19 @@ class EpisodeDataset(Dataset):
 
             # States: need seq_len+1 states for seq_len transitions
             states_out = states[start_idx:end_idx + 1]  # (seq_len+1, 4)
-            actions_out = forces[start_idx:end_idx]     # (seq_len, 1)
             mask = np.ones(self.seq_len, dtype=np.float32)
 
         else:
             # Episode is shorter - pad with zeros
             states_out = np.zeros((self.seq_len + 1, 4), dtype=np.float32)
-            actions_out = np.zeros((self.seq_len, 1), dtype=np.float32)
             mask = np.zeros(self.seq_len, dtype=np.float32)
 
             # Fill in actual data
             states_out[:T + 1] = states
-            actions_out[:T] = forces
             mask[:T] = 1.0
 
         return (
             torch.from_numpy(states_out),
-            torch.from_numpy(actions_out),
             torch.from_numpy(mask),
         )
 
@@ -134,14 +128,13 @@ def train_epoch(
     total_loss = 0.0
     num_batches = 0
 
-    for states, actions, mask in dataloader:
+    for states, mask in dataloader:
         # Move to device
         states = states.to(device)
-        actions = actions.to(device)
         mask = mask.to(device)
 
         # Forward pass
-        output = model(states, actions)
+        output = model(states)
 
         # Compute loss with masking
         loss = compute_prediction_loss(output['predictions'], output['targets'], mask)
@@ -187,8 +180,8 @@ def main():
     parser.add_argument(
         "--data_path",
         type=str,
-        default="data/random_exploration.pkl",
-        help="Path to the training data (default: data/random_exploration.pkl)",
+        default="data/passive_swings.pkl",
+        help="Path to the training data (default: data/passive_swings.pkl)",
     )
     parser.add_argument(
         "--epochs",

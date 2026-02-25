@@ -143,12 +143,13 @@ class InvertedPendulum:
         return ((theta + np.pi) % (2 * np.pi)) - np.pi
 
     def _check_termination(self) -> bool:
-        """Check if episode should terminate."""
-        x, _, theta, _ = self.state
+        """Check if episode should terminate.
 
-        # Pendulum fell too far (more than 90 degrees from vertical)
-        if abs(theta) > np.pi / 2:
-            return True
+        Only terminates when the cart hits the track boundary.
+        Angle is NOT a termination condition — in passive observation mode,
+        a freely swinging pendulum is valid dynamics we want to observe.
+        """
+        x = self.state[0]
 
         # Cart hit track boundary
         if abs(x) >= self.track_limit:
