@@ -53,6 +53,66 @@ class Encoder(nn.Module):
         return self.network(state)
 
 
+class CNNEncoder(nn.Module):
+    """
+    CNN encoder that maps a grayscale image to embedding space.
+
+    Architecture:
+        6 conv layers (32 filters, 5×5, padding 2) + BatchNorm + ReLU each.
+        Stride 2 on layers 1-2, stride 1 on layers 3-6.
+        Flatten → Linear → 32D embedding.
+
+    Produces the same output interface as the MLP Encoder.
+    """
+
+    def __init__(self, image_size: int = 64, embedding_dim: int = 32):
+        super().__init__()
+        self.image_size = image_size
+
+        layers: list[nn.Module] = []
+        in_ch = 1  # grayscale
+        for i in range(6):
+            stride = 2 if i < 2 else 1
+            layers.extend([
+                nn.Conv2d(in_ch, 32, kernel_size=5, stride=stride, padding=2),
+                nn.BatchNorm2d(32),
+                nn.ReLU(),
+            ])
+            in_ch = 32
+        self.conv = nn.Sequential(*layers)
+
+        # Compute flattened size by running a dummy input
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, image_size, image_size)
+            conv_out = self.conv(dummy)
+            self._flat_size = conv_out.numel()
+
+        self.fc = nn.Linear(self._flat_size, embedding_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode image(s) to embedding(s).
+
+        Args:
+            x: Tensor of shape (batch, 1, H, W) or (batch, seq_len, 1, H, W).
+
+        Returns:
+            Embedding of shape (batch, 32) or (batch, seq_len, 32).
+        """
+        if x.dim() == 5:
+            # Sequence input: (batch, seq_len, 1, H, W)
+            b, s, c, h, w = x.shape
+            x = x.reshape(b * s, c, h, w)
+            out = self.conv(x)
+            out = out.reshape(b * s, -1)
+            out = self.fc(out)
+            return out.reshape(b, s, -1)
+        else:
+            # Single timestep: (batch, 1, H, W)
+            out = self.conv(x)
+            out = out.reshape(out.size(0), -1)
+            return self.fc(out)
+
+
 class Integrator(nn.Module):
     """
     LSTM-based temporal integrator that maintains context over time.
@@ -180,13 +240,19 @@ class RPLModel(nn.Module):
         state_dim: int = 4,
         embedding_dim: int = 32,
         hidden_dim: int = 64,
+        use_image: bool = False,
+        image_size: int = 64,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
+        self.use_image = use_image
 
-        self.encoder = Encoder(state_dim, hidden_dim, embedding_dim)
+        if use_image:
+            self.encoder = CNNEncoder(image_size, embedding_dim)
+        else:
+            self.encoder = Encoder(state_dim, hidden_dim, embedding_dim)
         self.integrator = Integrator(embedding_dim, hidden_dim)
         self.predictor = Predictor(hidden_dim, embedding_dim)
 
@@ -199,7 +265,8 @@ class RPLModel(nn.Module):
         Forward pass for training.
 
         Args:
-            states: Tensor of shape (batch, seq_len, 4) - sequence of states
+            states: Tensor of shape (batch, seq_len, 4) for MLP encoder
+                    or (batch, seq_len, 1, H, W) for CNN encoder.
             hidden: Optional initial hidden state for LSTM
 
         Returns:
@@ -210,7 +277,7 @@ class RPLModel(nn.Module):
                 - 'lstm_outputs': LSTM hidden states (batch, seq_len-1, 64)
                 - 'hidden': Final LSTM hidden state tuple
         """
-        batch_size, seq_len, _ = states.shape
+        batch_size, seq_len = states.shape[0], states.shape[1]
 
         # Encode all states
         embeddings = self.encoder(states)  # (batch, seq_len, 32)
@@ -244,7 +311,7 @@ class RPLModel(nn.Module):
         Single-step forward pass.
 
         Args:
-            state: Tensor of shape (batch, 4) - current state
+            state: Tensor of shape (batch, 4) for MLP or (batch, 1, H, W) for CNN.
             hidden: LSTM hidden state from previous step
 
         Returns:
@@ -267,7 +334,7 @@ class RPLModel(nn.Module):
         Get internal representation for a state (for linear probing).
 
         Args:
-            state: Tensor of shape (batch, 4)
+            state: Tensor of shape (batch, 4) for MLP or (batch, 1, H, W) for CNN.
             hidden: LSTM hidden state
 
         Returns:
@@ -403,7 +470,67 @@ def test_model():
     assert output['predictions'].requires_grad
     print("  PASSED\n")
 
-    print("=== All tests passed ===")
+    print("=== All MLP tests passed ===\n")
+
+    # --- CNN Encoder Tests ---
+    print("=== CNN Encoder Tests ===\n")
+
+    cnn_enc = CNNEncoder(image_size=64, embedding_dim=32)
+    print(f"CNN flattened conv output size: {cnn_enc._flat_size}")
+    cnn_params = sum(p.numel() for p in cnn_enc.parameters())
+    print(f"CNN encoder parameters: {cnn_params:,}\n")
+
+    # Test CNN-1: Single image batch
+    print("CNN Test 1: Single image batch")
+    dummy_img = torch.randn(4, 1, 64, 64)
+    emb = cnn_enc(dummy_img)
+    print(f"  Input: {dummy_img.shape} -> Output: {emb.shape}")
+    assert emb.shape == (4, 32), f"Expected (4, 32), got {emb.shape}"
+    print("  PASSED\n")
+
+    # Test CNN-2: Sequence of images
+    print("CNN Test 2: Image sequence")
+    dummy_seq = torch.randn(4, 10, 1, 64, 64)
+    emb_seq = cnn_enc(dummy_seq)
+    print(f"  Input: {dummy_seq.shape} -> Output: {emb_seq.shape}")
+    assert emb_seq.shape == (4, 10, 32), f"Expected (4, 10, 32), got {emb_seq.shape}"
+    print("  PASSED\n")
+
+    # Test CNN-3: Full RPLModel with use_image=True
+    print("CNN Test 3: Full RPLModel forward pass")
+    cnn_model = RPLModel(use_image=True)
+    cnn_total = sum(p.numel() for p in cnn_model.parameters())
+    print(f"  CNN RPL model parameters: {cnn_total:,}")
+
+    img_states = torch.randn(4, 20, 1, 64, 64)
+    cnn_out = cnn_model(img_states)
+    print(f"  Input: {img_states.shape}")
+    print(f"  Predictions: {cnn_out['predictions'].shape}")
+    print(f"  Targets: {cnn_out['targets'].shape}")
+    assert cnn_out['predictions'].shape == (4, 19, 32)
+    print("  PASSED\n")
+
+    # Test CNN-4: Loss and gradient flow
+    print("CNN Test 4: Loss + gradient flow")
+    cnn_model.zero_grad()
+    cnn_out = cnn_model(img_states)
+    loss = compute_prediction_loss(cnn_out['predictions'], cnn_out['targets'])
+    print(f"  Loss: {loss.item():.4f}")
+    loss.backward()
+    conv_grad = list(cnn_model.encoder.conv.parameters())[0].grad
+    print(f"  CNN conv[0] gradient norm: {conv_grad.norm().item():.4f}")
+    assert conv_grad is not None and conv_grad.norm().item() > 0
+    print("  PASSED\n")
+
+    # Test CNN-5: Single-step forward
+    print("CNN Test 5: Single-step forward")
+    single_img = torch.randn(2, 1, 64, 64)
+    emb, pred, hid = cnn_model.forward_step(single_img)
+    print(f"  Embedding: {emb.shape}, Prediction: {pred.shape}")
+    assert emb.shape == (2, 32) and pred.shape == (2, 32)
+    print("  PASSED\n")
+
+    print("=== All CNN tests passed ===")
 
 
 if __name__ == "__main__":
