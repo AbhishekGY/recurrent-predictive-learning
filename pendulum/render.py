@@ -13,9 +13,9 @@ import numpy as np
 
 # Physical constants (must match environment.py)
 _PENDULUM_LENGTH: float = 0.5   # meters
-_CART_WIDTH: float = 0.3        # meters
-_CART_HEIGHT: float = 0.15      # meters
-_BOB_RADIUS: float = 0.04       # meters
+_CART_WIDTH: float = 1.0        # meters  (wide enough to read at 64×64)
+_CART_HEIGHT: float = 0.1       # meters  (shorter than wide on screen)
+_BOB_RADIUS: float = 0.15       # meters  (visible at this scale)
 
 # World coordinate bounds for rendering
 _X_MIN: float = -2.5
@@ -166,7 +166,7 @@ def render_pendulum(state: np.ndarray, image_size: int = 64) -> np.ndarray:
     tip_y = _PENDULUM_LENGTH * np.cos(theta)
     _draw_line(
         img, x, 0.0, tip_x, tip_y,
-        thickness_world=0.04,
+        thickness_world=0.15,
         value=_FG_VALUE,
         image_size=image_size,
     )
