@@ -13,6 +13,9 @@ build/
 data/
 checkpoints/
 
+# Generated plots
+plots/
+
 # IDE
 .idea/
 .vscode/
