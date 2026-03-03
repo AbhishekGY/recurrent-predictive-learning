@@ -13,12 +13,12 @@ import numpy as np
 
 # Physical constants (must match environment.py)
 _PENDULUM_LENGTH: float = 0.5   # meters
-_CART_WIDTH: float = 0.8        # meters  (rendering size, not physics)
-_CART_HEIGHT: float = 0.25      # meters
-_BOB_RADIUS: float = 0.12       # meters
+_CART_WIDTH: float = 0.5        # meters  (rendering size, not physics)
+_CART_HEIGHT: float = 0.15      # meters
+_BOB_RADIUS: float = 0.08       # meters
 
-# Fixed viewport: uniform scaling, covers full track (±2.0m) with margin
-_VIEW_HALF: float = 2.5         # half-size in meters (5m × 5m window)
+# Fixed viewport: uniform scaling, ±1.5m covers typical cart travel
+_VIEW_HALF: float = 1.5         # half-size in meters (3m × 3m window)
 _X_MIN: float = -_VIEW_HALF
 _X_MAX: float = _VIEW_HALF
 _Y_MIN: float = -_VIEW_HALF
@@ -167,7 +167,7 @@ def render_pendulum(state: np.ndarray, image_size: int = 64) -> np.ndarray:
     tip_y = _PENDULUM_LENGTH * np.cos(theta)
     _draw_line(
         img, x, 0.0, tip_x, tip_y,
-        thickness_world=0.15,
+        thickness_world=0.08,
         value=_FG_VALUE,
         image_size=image_size,
     )
@@ -194,6 +194,9 @@ def test_renderer() -> None:
         ("horizontal",  [0.0, 0.0, np.pi / 2, 0.0]),
         ("hanging",     [0.0, 0.0, np.pi, 0.0]),
         ("cart_right",  [1.5, 0.0, 0.3, 0.0]),
+        ("cart_mid",    [0.8, 0.0, 0.3, 0.0]),
+        ("small_tilt",  [0.0, 0.0, 0.15, 0.0]),
+        ("left_lean",   [-0.5, 0.0, -0.4, 0.0]),
     ]
 
     for name, state in test_cases:
