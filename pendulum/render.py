@@ -13,15 +13,16 @@ import numpy as np
 
 # Physical constants (must match environment.py)
 _PENDULUM_LENGTH: float = 0.5   # meters
-_CART_WIDTH: float = 1.0        # meters  (wide enough to read at 64×64)
-_CART_HEIGHT: float = 0.1       # meters  (shorter than wide on screen)
-_BOB_RADIUS: float = 0.15       # meters  (visible at this scale)
+_CART_WIDTH: float = 0.5        # meters
+_CART_HEIGHT: float = 0.15      # meters
+_BOB_RADIUS: float = 0.06       # meters
 
-# World coordinate bounds for rendering
-_X_MIN: float = -2.5
-_X_MAX: float = 2.5
-_Y_MIN: float = -0.7
-_Y_MAX: float = 0.9
+# Viewport: square, uniform scaling, centered on cart each frame
+_VIEW_HALF: float = 1.0         # half-size in meters (2m × 2m window)
+_X_MIN: float = -_VIEW_HALF
+_X_MAX: float = _VIEW_HALF
+_Y_MIN: float = -_VIEW_HALF
+_Y_MAX: float = _VIEW_HALF
 
 # Pixel intensities
 _BG_VALUE: float = 0.2
@@ -149,24 +150,23 @@ def render_pendulum(state: np.ndarray, image_size: int = 64) -> np.ndarray:
     Returns:
         Image tensor of shape (1, image_size, image_size), float32, values in [0, 1].
     """
-    x = float(state[0])
     theta = float(state[2])
 
     img = np.full((image_size, image_size), _BG_VALUE, dtype=np.float32)
 
-    # Cart — centered at (x, 0)
+    # Cart — always at origin (viewport follows the cart)
     _draw_filled_rect(
-        img, x, 0.0,
+        img, 0.0, 0.0,
         _CART_WIDTH / 2, _CART_HEIGHT / 2,
         _FG_VALUE, image_size,
     )
 
-    # Pole — from cart top-center to tip
-    tip_x = x + _PENDULUM_LENGTH * np.sin(theta)
+    # Pole — from cart center to tip (cart-relative coordinates)
+    tip_x = _PENDULUM_LENGTH * np.sin(theta)
     tip_y = _PENDULUM_LENGTH * np.cos(theta)
     _draw_line(
-        img, x, 0.0, tip_x, tip_y,
-        thickness_world=0.15,
+        img, 0.0, 0.0, tip_x, tip_y,
+        thickness_world=0.06,
         value=_FG_VALUE,
         image_size=image_size,
     )
