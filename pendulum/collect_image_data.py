@@ -47,20 +47,12 @@ def main():
         help="Maximum timesteps per episode (default: 500)",
     )
     parser.add_argument(
-        "--theta_range", type=float, default=0.8,
-        help="Max initial angle magnitude in radians (default: 0.8)",
+        "--theta_range", type=float, default=1.0,
+        help="Max initial angle magnitude in radians (default: 1.0)",
     )
     parser.add_argument(
-        "--omega_range", type=float, default=0.8,
-        help="Max initial angular velocity magnitude in rad/s (default: 0.8)",
-    )
-    parser.add_argument(
-        "--x_range", type=float, default=0.5,
-        help="Max initial cart position in meters (default: 0.5)",
-    )
-    parser.add_argument(
-        "--vx_range", type=float, default=0.3,
-        help="Max initial cart velocity in m/s (default: 0.3)",
+        "--x_range", type=float, default=1.5,
+        help="Max initial cart position in meters (default: 1.5)",
     )
     parser.add_argument(
         "--output_path", type=str, default="data/passive_swings_images.pkl",
@@ -82,18 +74,14 @@ def main():
 
     print(f"Collecting {args.num_episodes} passive image episodes ...")
     print(f"  theta range : [-{args.theta_range}, {args.theta_range}] rad")
-    print(f"  omega range : [-{args.omega_range}, {args.omega_range}] rad/s")
     print(f"  x range     : [-{args.x_range}, {args.x_range}] m")
-    print(f"  v_x range   : [-{args.vx_range}, {args.vx_range}] m/s")
     print(f"  max steps   : {args.max_steps}")
     print()
 
     for ep in range(args.num_episodes):
         state = env.reset(
             angle_range=args.theta_range,
-            omega_range=args.omega_range,
             x_range=args.x_range,
-            vx_range=args.vx_range,
         )
         states = [state.copy()]
         images = [render_pendulum(state)]
