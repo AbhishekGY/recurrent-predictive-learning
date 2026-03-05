@@ -18,6 +18,7 @@ from sklearn.metrics import r2_score
 
 from pendulum.environment import InvertedPendulum
 from pendulum.model import RPLModel
+from pendulum.render import render_pendulum
 
 
 def collect_test_episodes(
@@ -28,6 +29,7 @@ def collect_test_episodes(
     x_range: float = 0.5,
     vx_range: float = 0.3,
     seed: int = 12345,  # Different from training seed
+    render: bool = False,
 ) -> list:
     """
     Collect fresh passive test episodes for evaluation.
@@ -35,6 +37,9 @@ def collect_test_episodes(
     Uses a different seed than training to ensure held-out data.
     Episodes use zero force (passive dynamics) and terminate only
     on cart boundary or max steps.
+
+    When render=True, also renders each state to an image and includes
+    an 'images' key in each episode dict.
     """
     np.random.seed(seed)
 
@@ -49,7 +54,10 @@ def collect_test_episodes(
             vx_range=vx_range,
         )
 
-        states = [env.get_state().copy()]
+        state = env.get_state().copy()
+        states = [state]
+        if render:
+            images = [render_pendulum(state)]
 
         done = False
         step = 0
@@ -57,11 +65,16 @@ def collect_test_episodes(
         while not done and step < max_steps:
             state, done = env.step(0.0)
             states.append(state.copy())
+            if render:
+                images.append(render_pendulum(state))
             step += 1
 
-        episodes.append({
+        episode = {
             'states': np.array(states, dtype=np.float32),
-        })
+        }
+        if render:
+            episode['images'] = np.array(images, dtype=np.float32)
+        episodes.append(episode)
 
     return episodes
 
@@ -93,6 +106,8 @@ def collect_representations(
     all_representations = []
     all_next_states = []
 
+    use_image = model.use_image
+
     with torch.no_grad():
         for episode in episodes:
             states = episode['states']  # (T+1, 4)
@@ -101,12 +116,13 @@ def collect_representations(
             hidden = None
 
             for t in range(T):
-                state_t = torch.tensor(states[t:t+1], dtype=torch.float32, device=device)
+                if use_image:
+                    obs_t = torch.tensor(episode['images'][t:t+1], dtype=torch.float32, device=device)
+                else:
+                    obs_t = torch.tensor(states[t:t+1], dtype=torch.float32, device=device)
 
-                # Get representation after processing state_t
-                representation, hidden = model.get_representation(state_t, hidden)
+                representation, hidden = model.get_representation(obs_t, hidden)
 
-                # Store representation and corresponding next state
                 all_representations.append(representation.cpu().numpy().flatten())
                 all_next_states.append(states[t + 1])
 
@@ -165,6 +181,8 @@ def evaluate_prediction_accuracy(
     all_predictions = []
     all_next_states = []
 
+    use_image = model.use_image
+
     with torch.no_grad():
         for episode in episodes:
             states = episode['states']
@@ -173,10 +191,12 @@ def evaluate_prediction_accuracy(
             hidden = None
 
             for t in range(T):
-                state_t = torch.tensor(states[t:t+1], dtype=torch.float32, device=device)
+                if use_image:
+                    obs_t = torch.tensor(episode['images'][t:t+1], dtype=torch.float32, device=device)
+                else:
+                    obs_t = torch.tensor(states[t:t+1], dtype=torch.float32, device=device)
 
-                # Get prediction for next embedding
-                _, prediction, hidden = model.forward_step(state_t, hidden)
+                _, prediction, hidden = model.forward_step(obs_t, hidden)
 
                 all_predictions.append(prediction.cpu().numpy().flatten())
                 all_next_states.append(states[t + 1])
@@ -269,6 +289,11 @@ def main():
         default="auto",
         help="Device: 'cpu', 'cuda', or 'auto'",
     )
+    parser.add_argument(
+        "--image",
+        action="store_true",
+        help="Evaluate using image observations (requires CNN-trained checkpoint)",
+    )
 
     args = parser.parse_args()
 
@@ -286,11 +311,14 @@ def main():
 
     # Load model
     print("\nLoading model...")
-    model = RPLModel()
     checkpoint = torch.load(args.checkpoint, map_location=device)
+    encoder_type = checkpoint.get('encoder_type', 'mlp')
+    use_image = args.image or encoder_type == 'cnn'
+    model = RPLModel(use_image=use_image)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
     model.eval()
+    print(f"Encoder type: {encoder_type}")
 
     # Freeze parameters (not strictly necessary in eval mode, but explicit)
     for param in model.parameters():
@@ -309,6 +337,7 @@ def main():
         x_range=args.x_range,
         vx_range=args.vx_range,
         seed=args.seed,
+        render=use_image,
     )
 
     total_transitions = sum(len(ep['states']) - 1 for ep in episodes)
