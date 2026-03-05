@@ -19,6 +19,50 @@ from torch.utils.data import Dataset, DataLoader
 from pendulum.model import RPLModel, compute_prediction_loss
 
 
+class ImageEpisodeDataset(Dataset):
+    """
+    PyTorch Dataset for RPL training from image observations.
+
+    Same windowing/padding logic as EpisodeDataset but operates on
+    episode['images'] with shape (T+1, 1, 64, 64).
+    """
+
+    def __init__(self, episodes: list, seq_len: int = 50):
+        self.episodes = episodes
+        self.seq_len = seq_len
+
+    def __len__(self) -> int:
+        return len(self.episodes)
+
+    def __getitem__(self, idx: int) -> tuple:
+        """
+        Returns:
+            Tuple of:
+                - images: Tensor of shape (seq_len+1, 1, 64, 64)
+                - mask: Boolean tensor of shape (seq_len,)
+        """
+        episode = self.episodes[idx]
+        images = episode['images']  # (T+1, 1, 64, 64)
+
+        T = len(images) - 1
+
+        if T >= self.seq_len:
+            start_idx = np.random.randint(0, T - self.seq_len + 1)
+            end_idx = start_idx + self.seq_len
+            images_out = images[start_idx:end_idx + 1]
+            mask = np.ones(self.seq_len, dtype=np.float32)
+        else:
+            images_out = np.zeros((self.seq_len + 1, 1, 64, 64), dtype=np.float32)
+            mask = np.zeros(self.seq_len, dtype=np.float32)
+            images_out[:T + 1] = images
+            mask[:T] = 1.0
+
+        return (
+            torch.from_numpy(images_out),
+            torch.from_numpy(mask),
+        )
+
+
 class EpisodeDataset(Dataset):
     """
     PyTorch Dataset for RPL training episodes (passive observation).
@@ -162,6 +206,7 @@ def save_checkpoint(
     loss: float,
     path: Path,
     epoch_losses: list = None,
+    encoder_type: str = 'mlp',
 ) -> None:
     """Save a training checkpoint."""
     checkpoint = {
@@ -169,6 +214,7 @@ def save_checkpoint(
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss,
+        'encoder_type': encoder_type,
     }
     if epoch_losses is not None:
         checkpoint['epoch_losses'] = epoch_losses
@@ -231,6 +277,11 @@ def main():
         default="auto",
         help="Device to use: 'cpu', 'cuda', or 'auto' (default: auto)",
     )
+    parser.add_argument(
+        "--image",
+        action="store_true",
+        help="Train from image observations instead of state vectors",
+    )
 
     args = parser.parse_args()
 
@@ -246,8 +297,11 @@ def main():
     else:
         device = torch.device(args.device)
 
+    encoder_type = 'cnn' if args.image else 'mlp'
+
     print("=== RPL Training ===")
     print(f"Data path: {args.data_path}")
+    print(f"Encoder type: {encoder_type}")
     print(f"Epochs: {args.epochs}")
     print(f"Batch size: {args.batch_size}")
     print(f"Sequence length: {args.seq_len}")
@@ -263,7 +317,10 @@ def main():
     print(f"Loaded {len(episodes)} episodes")
 
     # Create dataset and dataloader
-    dataset = EpisodeDataset(episodes, seq_len=args.seq_len)
+    if args.image:
+        dataset = ImageEpisodeDataset(episodes, seq_len=args.seq_len)
+    else:
+        dataset = EpisodeDataset(episodes, seq_len=args.seq_len)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -274,7 +331,7 @@ def main():
     print(f"Created dataloader with {len(dataloader)} batches per epoch")
 
     # Create model
-    model = RPLModel()
+    model = RPLModel(use_image=args.image)
     model.to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Created model with {total_params:,} parameters")
@@ -307,7 +364,7 @@ def main():
         if epoch % 20 == 0:
             checkpoint_path = checkpoint_dir / f"rpl_model_epoch_{epoch}.pt"
             save_checkpoint(model, optimizer, epoch, loss, checkpoint_path,
-                           epoch_losses=losses)
+                           epoch_losses=losses, encoder_type=encoder_type)
             print(f"  -> Saved checkpoint: {checkpoint_path}")
 
     print("-" * 50)
@@ -318,7 +375,7 @@ def main():
     # Save final model
     final_path = checkpoint_dir / "rpl_model_final.pt"
     save_checkpoint(model, optimizer, args.epochs, losses[-1], final_path,
-                    epoch_losses=losses)
+                    epoch_losses=losses, encoder_type=encoder_type)
     print(f"Final model saved to: {final_path}")
 
     # Print loss progression
