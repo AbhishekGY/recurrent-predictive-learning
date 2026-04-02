@@ -43,6 +43,9 @@ class ImageEpisodeDataset(Dataset):
         """
         episode = self.episodes[idx]
         images = episode['images']  # (T+1, 1, 64, 64)
+        # Support uint8 images saved by collect_image_data.py
+        if images.dtype == np.uint8:
+            images = images.astype(np.float32) / 255.0
 
         T = len(images) - 1
 

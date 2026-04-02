@@ -94,8 +94,13 @@ def main():
             images.append(render_pendulum(state))
             step += 1
 
+        # Store images as uint8 to reduce memory ~4x (float32 -> uint8).
+        # render_pendulum returns float32 in [0, 1]; scale to [0, 255].
+        images_f32 = np.array(images, dtype=np.float32)
+        images_u8 = (images_f32 * 255).astype(np.uint8)
+
         episodes.append({
-            "images": np.array(images, dtype=np.float32),  # (T+1, 1, 64, 64)
+            "images": images_u8,                            # (T+1, 1, 64, 64) uint8
             "states": np.array(states, dtype=np.float32),   # (T+1, 4)
         })
 
