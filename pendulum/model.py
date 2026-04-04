@@ -58,7 +58,7 @@ class CNNEncoder(nn.Module):
     CNN encoder that maps a grayscale image to embedding space.
 
     Architecture:
-        6 conv layers (32 filters, 5×5, padding 2) + BatchNorm + ReLU each.
+        6 conv layers (32 filters, 5×5, padding 2) + GroupNorm(8) + ReLU each.
         Stride 2 on layers 1-2, stride 1 on layers 3-6.
         Flatten → Linear → 32D embedding.
 
@@ -75,7 +75,7 @@ class CNNEncoder(nn.Module):
             stride = 2 if i < 2 else 1
             layers.extend([
                 nn.Conv2d(in_ch, 32, kernel_size=5, stride=stride, padding=2),
-                nn.BatchNorm2d(32),
+                nn.GroupNorm(8, 32),
                 nn.ReLU(),
             ])
             in_ch = 32
