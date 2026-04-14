@@ -362,6 +362,9 @@ def main():
         # Track best loss
         if loss < best_loss:
             best_loss = loss
+            save_checkpoint(model, optimizer, epoch, loss,
+                    checkpoint_dir / "rpl_model_best.pt",
+                    epoch_losses=losses, encoder_type=encoder_type)
 
         # Save checkpoint every 20 epochs
         if epoch % 20 == 0:
