@@ -218,6 +218,7 @@ def save_checkpoint(
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss,
         'encoder_type': encoder_type,
+        'normalize_embeddings': getattr(model, 'normalize_embeddings', True),
     }
     if epoch_losses is not None:
         checkpoint['epoch_losses'] = epoch_losses
@@ -285,6 +286,13 @@ def main():
         action="store_true",
         help="Train from image observations instead of state vectors",
     )
+    parser.add_argument(
+        "--no_normalize",
+        action="store_true",
+        help="Disable L2 normalization of embeddings (kept for ablation; "
+             "normalization is on by default and prevents the embedding-scale "
+             "runaway that destabilizes self-predictive training)",
+    )
 
     args = parser.parse_args()
 
@@ -309,6 +317,7 @@ def main():
     print(f"Batch size: {args.batch_size}")
     print(f"Sequence length: {args.seq_len}")
     print(f"Learning rates: encoder/integrator={args.lr_slow}, predictor={args.lr_fast}")
+    print(f"Normalize embeddings: {not args.no_normalize}")
     print(f"Device: {device}")
     print(f"Random seed: {args.seed}")
     print()
@@ -334,7 +343,7 @@ def main():
     print(f"Created dataloader with {len(dataloader)} batches per epoch")
 
     # Create model
-    model = RPLModel(use_image=args.image)
+    model = RPLModel(use_image=args.image, normalize_embeddings=not args.no_normalize)
     model.to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Created model with {total_params:,} parameters")

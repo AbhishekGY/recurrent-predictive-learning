@@ -13,6 +13,7 @@ Passive observation mode — no actions/forces in the model.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
 
 
@@ -30,8 +31,10 @@ class Encoder(nn.Module):
         z_t = phi(x_t)  where x_t = [x, v_x, theta, omega]
     """
 
-    def __init__(self, state_dim: int = 4, hidden_dim: int = 64, embedding_dim: int = 32):
+    def __init__(self, state_dim: int = 4, hidden_dim: int = 64, embedding_dim: int = 32,
+                 normalize: bool = True):
         super().__init__()
+        self.normalize = normalize
         self.network = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
@@ -48,9 +51,14 @@ class Encoder(nn.Module):
             state: Tensor of shape (batch, 4) or (batch, seq_len, 4)
 
         Returns:
-            Embedding tensor of shape (batch, 32) or (batch, seq_len, 32)
+            Embedding tensor of shape (batch, 32) or (batch, seq_len, 32).
+            When ``normalize`` is set, embeddings are L2-normalized onto the
+            unit sphere so the self-predictive target has a fixed scale.
         """
-        return self.network(state)
+        z = self.network(state)
+        if self.normalize:
+            z = F.normalize(z, dim=-1)
+        return z
 
 
 class CNNEncoder(nn.Module):
@@ -65,9 +73,11 @@ class CNNEncoder(nn.Module):
     Produces the same output interface as the MLP Encoder.
     """
 
-    def __init__(self, image_size: int = 64, embedding_dim: int = 32):
+    def __init__(self, image_size: int = 64, embedding_dim: int = 32,
+                 normalize: bool = True):
         super().__init__()
         self.image_size = image_size
+        self.normalize = normalize
 
         layers: list[nn.Module] = []
         in_ch = 1  # grayscale
@@ -105,12 +115,17 @@ class CNNEncoder(nn.Module):
             out = self.conv(x)
             out = out.reshape(b * s, -1)
             out = self.fc(out)
-            return out.reshape(b, s, -1)
+            out = out.reshape(b, s, -1)
         else:
             # Single timestep: (batch, 1, H, W)
             out = self.conv(x)
             out = out.reshape(out.size(0), -1)
-            return self.fc(out)
+            out = self.fc(out)
+
+        if self.normalize:
+            # L2-normalize onto the unit sphere to fix the embedding scale.
+            out = F.normalize(out, dim=-1)
+        return out
 
 
 class Integrator(nn.Module):
@@ -242,17 +257,19 @@ class RPLModel(nn.Module):
         hidden_dim: int = 64,
         use_image: bool = False,
         image_size: int = 64,
+        normalize_embeddings: bool = True,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.use_image = use_image
+        self.normalize_embeddings = normalize_embeddings
 
         if use_image:
-            self.encoder = CNNEncoder(image_size, embedding_dim)
+            self.encoder = CNNEncoder(image_size, embedding_dim, normalize=normalize_embeddings)
         else:
-            self.encoder = Encoder(state_dim, hidden_dim, embedding_dim)
+            self.encoder = Encoder(state_dim, hidden_dim, embedding_dim, normalize=normalize_embeddings)
         self.integrator = Integrator(embedding_dim, hidden_dim)
         self.predictor = Predictor(hidden_dim, embedding_dim)
 
