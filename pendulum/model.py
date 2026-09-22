@@ -396,6 +396,66 @@ def compute_prediction_loss(
     return loss
 
 
+def compute_vic_regularization(
+    embeddings: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    gamma: float = 1.0,
+    eps: float = 1e-4,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    VICReg-style variance and covariance regularization on embeddings.
+
+    This is the anti-collapse counterpart to the prediction (invariance) loss.
+    Because the target is a stop-gradient copy of the encoder's own output,
+    plain MSE can be driven to zero by collapsing every embedding to a near
+    constant. These two terms make that degenerate solution costly:
+
+        - variance:   hinge that keeps each embedding dimension's std >= gamma
+                      across the batch, so no dimension collapses to a constant.
+        - covariance: pushes the off-diagonal of the embedding covariance
+                      matrix to zero, decorrelating dimensions so they carry
+                      distinct information rather than duplicating one factor.
+
+    Embeddings are NOT L2-normalized in this regime: the variance hinge fixes
+    the representation scale from below and the invariance loss penalizes
+    growth from above, which is what tames the scale runaway that L2
+    normalization otherwise handled.
+
+    Args:
+        embeddings: Encoder outputs (batch, seq_len, embedding_dim) or (N, dim).
+        mask: Optional (batch, seq_len) mask selecting valid (non-padded) steps.
+        gamma: Target minimum per-dimension standard deviation.
+        eps: Numerical floor inside the sqrt for the std estimate.
+
+    Returns:
+        Tuple of (variance_loss, covariance_loss), both scalars.
+    """
+    if embeddings.dim() == 3:
+        b, s, d = embeddings.shape
+        z = embeddings.reshape(b * s, d)
+        if mask is not None:
+            z = z[mask.reshape(b * s).bool()]
+    else:
+        z = embeddings
+
+    n, d = z.shape
+    if n < 2:
+        zero = embeddings.sum() * 0.0
+        return zero, zero
+
+    # Variance term: hinge so each dimension keeps std >= gamma.
+    std = torch.sqrt(z.var(dim=0) + eps)  # (d,)
+    variance_loss = torch.relu(gamma - std).mean()
+
+    # Covariance term: squared off-diagonal covariances, normalized by dim.
+    z_centered = z - z.mean(dim=0, keepdim=True)
+    cov = (z_centered.T @ z_centered) / (n - 1)  # (d, d)
+    off_diag = cov - torch.diag(torch.diagonal(cov))
+    covariance_loss = off_diag.pow(2).sum() / d
+
+    return variance_loss, covariance_loss
+
+
 def test_model():
     """Test the RPL model with dummy data."""
     print("=== RPL Model Test (Passive Observation) ===\n")
