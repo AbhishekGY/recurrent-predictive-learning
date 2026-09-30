@@ -314,11 +314,15 @@ def main():
     checkpoint = torch.load(args.checkpoint, map_location=device)
     encoder_type = checkpoint.get('encoder_type', 'mlp')
     use_image = args.image or encoder_type == 'cnn'
-    model = RPLModel(use_image=use_image)
+    # Default False so pre-normalization checkpoints (which lack this key) load
+    # with their original, un-normalized behavior.
+    normalize_embeddings = checkpoint.get('normalize_embeddings', False)
+    model = RPLModel(use_image=use_image, normalize_embeddings=normalize_embeddings)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
     model.eval()
     print(f"Encoder type: {encoder_type}")
+    print(f"Normalize embeddings: {normalize_embeddings}")
 
     # Freeze parameters (not strictly necessary in eval mode, but explicit)
     for param in model.parameters():

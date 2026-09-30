@@ -13,6 +13,7 @@ Passive observation mode — no actions/forces in the model.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
 
 
@@ -30,8 +31,10 @@ class Encoder(nn.Module):
         z_t = phi(x_t)  where x_t = [x, v_x, theta, omega]
     """
 
-    def __init__(self, state_dim: int = 4, hidden_dim: int = 64, embedding_dim: int = 32):
+    def __init__(self, state_dim: int = 4, hidden_dim: int = 64, embedding_dim: int = 32,
+                 normalize: bool = True):
         super().__init__()
+        self.normalize = normalize
         self.network = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
@@ -48,9 +51,14 @@ class Encoder(nn.Module):
             state: Tensor of shape (batch, 4) or (batch, seq_len, 4)
 
         Returns:
-            Embedding tensor of shape (batch, 32) or (batch, seq_len, 32)
+            Embedding tensor of shape (batch, 32) or (batch, seq_len, 32).
+            When ``normalize`` is set, embeddings are L2-normalized onto the
+            unit sphere so the self-predictive target has a fixed scale.
         """
-        return self.network(state)
+        z = self.network(state)
+        if self.normalize:
+            z = F.normalize(z, dim=-1)
+        return z
 
 
 class CNNEncoder(nn.Module):
@@ -65,9 +73,11 @@ class CNNEncoder(nn.Module):
     Produces the same output interface as the MLP Encoder.
     """
 
-    def __init__(self, image_size: int = 64, embedding_dim: int = 32):
+    def __init__(self, image_size: int = 64, embedding_dim: int = 32,
+                 normalize: bool = True):
         super().__init__()
         self.image_size = image_size
+        self.normalize = normalize
 
         layers: list[nn.Module] = []
         in_ch = 1  # grayscale
@@ -105,12 +115,17 @@ class CNNEncoder(nn.Module):
             out = self.conv(x)
             out = out.reshape(b * s, -1)
             out = self.fc(out)
-            return out.reshape(b, s, -1)
+            out = out.reshape(b, s, -1)
         else:
             # Single timestep: (batch, 1, H, W)
             out = self.conv(x)
             out = out.reshape(out.size(0), -1)
-            return self.fc(out)
+            out = self.fc(out)
+
+        if self.normalize:
+            # L2-normalize onto the unit sphere to fix the embedding scale.
+            out = F.normalize(out, dim=-1)
+        return out
 
 
 class Integrator(nn.Module):
@@ -242,17 +257,19 @@ class RPLModel(nn.Module):
         hidden_dim: int = 64,
         use_image: bool = False,
         image_size: int = 64,
+        normalize_embeddings: bool = True,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.use_image = use_image
+        self.normalize_embeddings = normalize_embeddings
 
         if use_image:
-            self.encoder = CNNEncoder(image_size, embedding_dim)
+            self.encoder = CNNEncoder(image_size, embedding_dim, normalize=normalize_embeddings)
         else:
-            self.encoder = Encoder(state_dim, hidden_dim, embedding_dim)
+            self.encoder = Encoder(state_dim, hidden_dim, embedding_dim, normalize=normalize_embeddings)
         self.integrator = Integrator(embedding_dim, hidden_dim)
         self.predictor = Predictor(hidden_dim, embedding_dim)
 
@@ -377,6 +394,66 @@ def compute_prediction_loss(
         loss = mse_per_step.mean()
 
     return loss
+
+
+def compute_vic_regularization(
+    embeddings: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    gamma: float = 1.0,
+    eps: float = 1e-4,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    VICReg-style variance and covariance regularization on embeddings.
+
+    This is the anti-collapse counterpart to the prediction (invariance) loss.
+    Because the target is a stop-gradient copy of the encoder's own output,
+    plain MSE can be driven to zero by collapsing every embedding to a near
+    constant. These two terms make that degenerate solution costly:
+
+        - variance:   hinge that keeps each embedding dimension's std >= gamma
+                      across the batch, so no dimension collapses to a constant.
+        - covariance: pushes the off-diagonal of the embedding covariance
+                      matrix to zero, decorrelating dimensions so they carry
+                      distinct information rather than duplicating one factor.
+
+    Embeddings are NOT L2-normalized in this regime: the variance hinge fixes
+    the representation scale from below and the invariance loss penalizes
+    growth from above, which is what tames the scale runaway that L2
+    normalization otherwise handled.
+
+    Args:
+        embeddings: Encoder outputs (batch, seq_len, embedding_dim) or (N, dim).
+        mask: Optional (batch, seq_len) mask selecting valid (non-padded) steps.
+        gamma: Target minimum per-dimension standard deviation.
+        eps: Numerical floor inside the sqrt for the std estimate.
+
+    Returns:
+        Tuple of (variance_loss, covariance_loss), both scalars.
+    """
+    if embeddings.dim() == 3:
+        b, s, d = embeddings.shape
+        z = embeddings.reshape(b * s, d)
+        if mask is not None:
+            z = z[mask.reshape(b * s).bool()]
+    else:
+        z = embeddings
+
+    n, d = z.shape
+    if n < 2:
+        zero = embeddings.sum() * 0.0
+        return zero, zero
+
+    # Variance term: hinge so each dimension keeps std >= gamma.
+    std = torch.sqrt(z.var(dim=0) + eps)  # (d,)
+    variance_loss = torch.relu(gamma - std).mean()
+
+    # Covariance term: squared off-diagonal covariances, normalized by dim.
+    z_centered = z - z.mean(dim=0, keepdim=True)
+    cov = (z_centered.T @ z_centered) / (n - 1)  # (d, d)
+    off_diag = cov - torch.diag(torch.diagonal(cov))
+    covariance_loss = off_diag.pow(2).sum() / d
+
+    return variance_loss, covariance_loss
 
 
 def test_model():
